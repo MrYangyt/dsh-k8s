@@ -1,0 +1,6 @@
+node_modules/
+dist/
+.tsdown-output/
+.workbuddy/
+*.log
+.DS_Store

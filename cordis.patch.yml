@@ -1,0 +1,5 @@
+# DSH bundle patch for dsh-k8s-manager
+# Inserts the k8s-manager plugin row into the profile composition.
+- insert:
+    - id: k8s-manager
+      name: 'dsh-k8s-manager'
