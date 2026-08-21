@@ -17,31 +17,32 @@ A Lens-style Kubernetes cluster manager for DeepSeek Harness (DSH). Manage your 
 
 ## Installation
 
-### As a DSH plugin
+### Option 2: Install directly from GitHub
 
 ```bash
-dsh plugin --profile web add dsh-k8s-manager
+dsh plugin --profile web add github:MrYangyt/dsh-k8s
 ```
 
-Then restart your DSH web process:
+Pin to a specific commit (recommended to avoid unexpected upgrades):
 
 ```bash
-dsh web
+dsh plugin --profile web add "github:MrYangyt/dsh-k8s#<commit-hash>"
 ```
 
-### From source
+### Option 3: Local development
 
 ```bash
-git clone https://github.com/your-org/dsh-k8s-manager.git
+git clone https://github.com/MrYangyt/dsh-k8s.git
 cd dsh-k8s-manager
 npm install
 npm run build
+dsh plugin --profile web add /path/to/dsh-k8s
 ```
 
-Add the local path to your DSH profile:
+After installation, restart the DSH web process to take effect:
 
 ```bash
-dsh plugin --profile web add /path/to/dsh-k8s-manager
+dsh web
 ```
 
 ## Usage

@@ -18,31 +18,30 @@
 
 ## 安装
 
-### 作为 DSH 插件安装
-
 ```bash
-dsh plugin --profile web add dsh-k8s-manager
+dsh plugin --profile web add github:MrYangyt/dsh-k8s
 ```
 
-然后重启 DSH web 进程：
+锁定到某个 commit（推荐，避免意外升级）：
 
 ```bash
-dsh web
+dsh plugin --profile web add "github:MrYangyt/dsh-k8s#<commit-hash>"
 ```
 
-### 从源码安装
+### 方式三：本地开发调试
 
 ```bash
-git clone https://github.com/your-org/dsh-k8s-manager.git
+git clone https://github.com/MrYangyt/dsh-k8s.git
 cd dsh-k8s-manager
 npm install
 npm run build
+dsh plugin --profile web add /path/to/dsh-k8s
 ```
 
-把本地路径添加到你的 DSH profile：
+安装完成后，重启 DSH web 进程生效：
 
 ```bash
-dsh plugin --profile web add /path/to/dsh-k8s-manager
+dsh web
 ```
 
 ## 使用
