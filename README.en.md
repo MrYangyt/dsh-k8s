@@ -3,7 +3,8 @@
 [中文](./README.md)
 
 A Lens-style Kubernetes cluster manager for DeepSeek Harness (DSH). Manage your K8s clusters directly inside the DSH conversation view.
-
+<img width="3008" height="1740" alt="image" src="https://github.com/user-attachments/assets/16b55c36-776e-4709-afdf-99aaa2ead8b2" />
+<img width="3126" height="1862" alt="image" src="https://github.com/user-attachments/assets/d1308392-c7ce-4adb-9db7-ff71c485dd07" />
 ## Features
 
 - **Multi-cluster management**: Add, switch, and delete multiple kubeconfigs
