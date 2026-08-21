@@ -3,6 +3,8 @@
 [English](./README.en.md)
 
 一个 Lens 风格的 Kubernetes 集群管理插件，用于 DeepSeek Harness (DSH)。在 DSH 会话视图中直接管理你的 K8s 集群。
+<img width="3008" height="1740" alt="image" src="https://github.com/user-attachments/assets/16b55c36-776e-4709-afdf-99aaa2ead8b2" />
+<img width="3126" height="1862" alt="image" src="https://github.com/user-attachments/assets/d1308392-c7ce-4adb-9db7-ff71c485dd07" />
 
 ## 功能特性
 
