@@ -13,7 +13,16 @@ try {
 } catch (e) {}
 
 const cssInject = css
-  ? `\n(function(){var style=document.createElement('style');style.textContent=${JSON.stringify(css)};document.head.appendChild(style);})();`
+  ? `const applyClient = module.exports.apply;
+    module.exports.apply = (ctx, ...args) => {
+      ctx.effect(() => {
+        const style = document.createElement('style');
+        style.textContent = ${JSON.stringify(css)};
+        document.head.appendChild(style);
+        return () => style.remove();
+      }, 'k8s-manager.styles');
+      return applyClient(ctx, ...args);
+    };`
   : ''
 
 const wrapped = `window.__ModuleLoader__.load({
@@ -22,10 +31,10 @@ const wrapped = `window.__ModuleLoader__.load({
     var module = { exports: {} };
     var exports = module.exports;
     ${bundle}
+    ${cssInject}
     return module.exports;
   }
 });
-${cssInject}
 `
 
 mkdirSync('client', { recursive: true })

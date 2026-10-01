@@ -12657,8 +12657,8 @@ var import_xterm = (/* @__PURE__ */ __commonJSMin(((exports, module) => {
 					return !(t.length > e.length) && 0 === d(e, t, 0, i);
 				}, t.commonPrefixLength = function(e, t) {
 					const i = Math.min(e.length, t.length);
-					let s;
-					for (s = 0; s < i; s++) if (e.charCodeAt(s) !== t.charCodeAt(s)) return s;
+					let s = 0;
+					for (; s < i; s++) if (e.charCodeAt(s) !== t.charCodeAt(s)) return s;
 					return i;
 				}, t.commonSuffixLength = function(e, t) {
 					const i = Math.min(e.length, t.length);
@@ -13028,8 +13028,201 @@ var import_xterm = (/* @__PURE__ */ __commonJSMin(((exports, module) => {
 	})()));
 })))();
 //#endregion
+//#region src/client/resources.ts
+/** kubectl aligns fields at header offsets, including headers such as LAST SEEN. */
+function parseResourceTable(table, items) {
+	const lines = table.split(/\r?\n/).filter((line) => line.trim());
+	if (!lines.length || /^No resources found(?:[.\s]|$)/i.test(lines[0].trim())) return {
+		headers: [],
+		rows: []
+	};
+	const columns = Array.from((lines[0] || "").matchAll(/\S.*?(?=\s{2,}|$)/g));
+	const headers = columns.map((column) => column[0]);
+	const nameColumn = headers.indexOf("NAME");
+	const namespaceColumn = headers.indexOf("NAMESPACE");
+	const itemLookup = new Map(items.map((item, index) => [`${item.namespace}/${item.name}`, index]));
+	return {
+		headers,
+		rows: lines.slice(1).map((line) => {
+			const cells = columns.map((column, index) => line.slice(column.index, columns[index + 1]?.index).trim());
+			const namespace = namespaceColumn < 0 ? "" : cells[namespaceColumn];
+			return {
+				cells,
+				itemIndex: itemLookup.get(`${namespace}/${cells[nameColumn]}`) ?? -1
+			};
+		})
+	};
+}
+function statusTone(value) {
+	const status = value.trim();
+	if (/(failed|error|errimagepull|crash|backoff|notready|evicted|oomkilled|invalidimagename|outofcpu|outofmemory|^lost$)/i.test(status)) return "error";
+	if (/(pending|terminating|unknown|waiting|creating|initializing|init:|unschedulable|schedulingdisabled|^released$)/i.test(status)) return "warn";
+	if (/^(running|active|bound|ready|complete|completed|succeeded)$/i.test(status)) return "ok";
+	const ready = /^(\d+)\/(\d+)$/.exec(status);
+	if (ready) return Number(ready[1]) === Number(ready[2]) ? "ok" : "warn";
+	return "neutral";
+}
+//#endregion
+//#region src/client/theme.ts
+/** 透明终端沿用页面背景，ANSI 状态色沿用宿主的语义色。 */
+function createTerminalTheme(colors) {
+	return {
+		background: "#00000000",
+		foreground: colors.foreground,
+		cursor: colors.foreground,
+		cursorAccent: colors.surface,
+		selectionBackground: colors.selection,
+		selectionInactiveBackground: colors.selection,
+		black: colors.secondary,
+		brightBlack: colors.muted,
+		white: colors.foreground,
+		brightWhite: colors.foreground,
+		red: colors.error,
+		brightRed: colors.error,
+		green: colors.success,
+		brightGreen: colors.success,
+		yellow: colors.warning,
+		brightYellow: colors.warning,
+		blue: colors.accent,
+		brightBlue: colors.accent,
+		magenta: colors.accent,
+		brightMagenta: colors.accent,
+		cyan: colors.success,
+		brightCyan: colors.success
+	};
+}
+/**
+* 跟随 DSH 及主题插件最终生效的 CSS，包括局部覆盖和透明颜色。
+* rc.2 的 theme/change 会由宿主 presenter 写入 body 的 token 和主题属性；
+* 只观察祖先属性和 head 样式，避免监视终端输出的整个 DOM 子树。
+*/
+function watchTerminalTheme(terminal, element) {
+	const document = element.ownerDocument;
+	const view = document.defaultView;
+	if (!view) return () => {};
+	const probe = document.createElement("span");
+	probe.setAttribute("aria-hidden", "true");
+	probe.style.cssText = "all: initial; position: absolute; visibility: hidden; pointer-events: none; width: 0; height: 0; overflow: hidden;";
+	element.appendChild(probe);
+	const canvas = document.createElement("canvas");
+	canvas.width = canvas.height = 1;
+	const context = canvas.getContext("2d", { willReadFrequently: true });
+	const resolveColor = (value, fallback) => {
+		probe.style.color = "";
+		probe.style.color = value.trim();
+		if (!probe.style.color) return fallback;
+		const resolved = view.getComputedStyle(probe).color;
+		if (!context) return resolved || fallback;
+		context.clearRect(0, 0, 1, 1);
+		context.fillStyle = resolved;
+		context.fillRect(0, 0, 1, 1);
+		const rgba = context.getImageData(0, 0, 1, 1).data;
+		return `#${Array.from(rgba, (channel) => channel.toString(16).padStart(2, "0")).join("")}`;
+	};
+	let lastTheme = "";
+	let frame;
+	let disposed = false;
+	const update = () => {
+		frame = void 0;
+		if (disposed) return;
+		const style = view.getComputedStyle(element);
+		const token = (name, fallback) => resolveColor(style.getPropertyValue(name), fallback);
+		const foreground = token("--dsw-alias-label-primary", resolveColor(style.color, "#202124"));
+		const surface = token("--dsw-alias-bg-base", resolveColor(view.getComputedStyle(document.body).backgroundColor, "#ffffff"));
+		const secondary = token("--dsw-alias-label-secondary", foreground);
+		const accent = token("--dsw-alias-state-business-primary", foreground);
+		const theme = createTerminalTheme({
+			foreground,
+			surface,
+			secondary,
+			muted: token("--dsw-alias-label-tertiary", secondary),
+			accent,
+			error: token("--dsw-alias-state-error-primary", foreground),
+			success: token("--dsw-alias-state-success-primary", foreground),
+			warning: token("--dsw-alias-state-warn-label", token("--dsw-alias-state-warn-primary", foreground)),
+			selection: token("--dsw-alias-bg-document-selection", accent)
+		});
+		const signature = JSON.stringify(theme);
+		if (signature !== lastTheme) {
+			lastTheme = signature;
+			terminal.options.theme = theme;
+		}
+	};
+	const schedule = () => {
+		if (!disposed && frame === void 0) frame = view.requestAnimationFrame(update);
+	};
+	const ancestors = new view.MutationObserver((records) => {
+		if (records.some((record) => record.attributeName === "class" || record.attributeName === "style" || record.attributeName?.startsWith("data-"))) schedule();
+	});
+	for (let node = element; node; node = node.parentElement) ancestors.observe(node, { attributes: true });
+	const isStylesheet = (node) => node?.nodeType === 1 && ["STYLE", "LINK"].includes(node.tagName);
+	const stylesheets = new view.MutationObserver((records) => {
+		if (records.some((record) => isStylesheet(record.target) || isStylesheet(record.target.parentNode) || Array.from(record.addedNodes).concat(Array.from(record.removedNodes)).some(isStylesheet))) schedule();
+	});
+	stylesheets.observe(document.head, {
+		childList: true,
+		subtree: true,
+		characterData: true,
+		attributes: true,
+		attributeFilter: [
+			"href",
+			"media",
+			"disabled",
+			"rel"
+		]
+	});
+	document.head.addEventListener("load", schedule, true);
+	const media = ["(prefers-color-scheme: dark)", "(prefers-reduced-transparency: reduce)"].map((query) => view.matchMedia(query));
+	media.forEach((query) => query.addEventListener("change", schedule));
+	update();
+	return () => {
+		disposed = true;
+		ancestors.disconnect();
+		stylesheets.disconnect();
+		document.head.removeEventListener("load", schedule, true);
+		media.forEach((query) => query.removeEventListener("change", schedule));
+		if (frame !== void 0) view.cancelAnimationFrame(frame);
+		probe.remove();
+	};
+}
+//#endregion
 //#region src/client/index.tsx
-const inject = ["timer"];
+var import_addon_fit = (/* @__PURE__ */ __commonJSMin(((exports, module) => {
+	(function(e, t) {
+		"object" == typeof exports && "object" == typeof module ? module.exports = t() : "function" == typeof define && define.amd ? define([], t) : "object" == typeof exports ? exports.FitAddon = t() : e.FitAddon = t();
+	})(globalThis, (() => (() => {
+		"use strict";
+		var e = {};
+		return (() => {
+			var t = e;
+			Object.defineProperty(t, "__esModule", { value: !0 }), t.FitAddon = void 0, t.FitAddon = class {
+				activate(e) {
+					this._terminal = e;
+				}
+				dispose() {}
+				fit() {
+					const e = this.proposeDimensions();
+					if (!e || !this._terminal || isNaN(e.cols) || isNaN(e.rows)) return;
+					const t = this._terminal._core;
+					this._terminal.rows === e.rows && this._terminal.cols === e.cols || (t._renderService.clear(), this._terminal.resize(e.cols, e.rows));
+				}
+				proposeDimensions() {
+					if (!this._terminal) return;
+					if (!this._terminal.element || !this._terminal.element.parentElement) return;
+					const e = this._terminal._core._renderService.dimensions;
+					if (0 === e.css.cell.width || 0 === e.css.cell.height) return;
+					const t = 0 === this._terminal.options.scrollback ? 0 : this._terminal.options.overviewRuler?.width || 14, r = window.getComputedStyle(this._terminal.element.parentElement), i = parseInt(r.getPropertyValue("height")), o = Math.max(0, parseInt(r.getPropertyValue("width"))), s = window.getComputedStyle(this._terminal.element), n = i - (parseInt(s.getPropertyValue("padding-top")) + parseInt(s.getPropertyValue("padding-bottom"))), l = o - (parseInt(s.getPropertyValue("padding-right")) + parseInt(s.getPropertyValue("padding-left"))) - t;
+					return {
+						cols: Math.max(2, Math.floor(l / e.css.cell.width)),
+						rows: Math.max(1, Math.floor(n / e.css.cell.height))
+					};
+				}
+			};
+		})(), e;
+	})()));
+})))();
+const inject = ["slots"];
+const PANEL_ID = "k8s-manager";
 async function call(method, args) {
 	const res = await fetch("/dsh-k8s-manager/" + method, {
 		method: "POST",
@@ -13044,11 +13237,11 @@ async function call(method, args) {
 }
 const TREE = [
 	{
-		group: "Overview",
-		items: [["overview", "Overview"]]
+		group: "集群概览",
+		items: [["overview", "集群概览"]]
 	},
 	{
-		group: "Cluster",
+		group: "集群",
 		items: [
 			["nodes", "Nodes"],
 			["namespaces", "Namespaces"],
@@ -13056,7 +13249,7 @@ const TREE = [
 		]
 	},
 	{
-		group: "Workloads",
+		group: "工作负载",
 		items: [
 			["pods", "Pods"],
 			["deployments", "Deployments"],
@@ -13068,7 +13261,7 @@ const TREE = [
 		]
 	},
 	{
-		group: "Network",
+		group: "网络",
 		items: [
 			["services", "Services"],
 			["ingresses", "Ingresses"],
@@ -13076,11 +13269,11 @@ const TREE = [
 		]
 	},
 	{
-		group: "Config",
+		group: "配置",
 		items: [["configmaps", "ConfigMaps"], ["secrets", "Secrets"]]
 	},
 	{
-		group: "Storage",
+		group: "存储",
 		items: [
 			["persistentvolumes", "PVs"],
 			["persistentvolumeclaims", "PVCs"],
@@ -13089,7 +13282,7 @@ const TREE = [
 	}
 ];
 const KIND_LABEL = {
-	overview: "Overview",
+	overview: "集群概览",
 	pods: "Pods",
 	deployments: "Deployments",
 	statefulsets: "StatefulSets",
@@ -13126,8 +13319,11 @@ const state = {
 	tableError: "",
 	filter: "",
 	nsFilter: "all",
+	statusFilter: "all",
 	detail: null
 };
+let viewRequest = 0;
+let detailRequest = 0;
 function set(patch) {
 	Object.assign(state, patch);
 	listeners.forEach((f) => f());
@@ -13145,9 +13341,14 @@ function useStore() {
 }
 async function boot() {
 	if (state.boot === "loading") return;
+	++viewRequest;
+	++detailRequest;
 	set({
 		boot: "loading",
-		bootError: ""
+		bootError: "",
+		overviewLoading: false,
+		tableLoading: false,
+		detail: null
 	});
 	try {
 		const r = await call("detect");
@@ -13163,13 +13364,18 @@ async function boot() {
 			return;
 		}
 		if (!r.configs || r.configs.length === 0) {
-			set({ boot: "no-contexts" });
+			set({
+				boot: "no-contexts",
+				configs: [],
+				current: "",
+				detail: null
+			});
 			return;
 		}
 		set({
 			boot: "ready",
 			configs: r.configs,
-			current: r.current || r.configs[0]
+			current: r.configs.includes(state.current) ? state.current : r.current || r.configs[0]
 		});
 		loadOverview();
 	} catch (e) {
@@ -13180,15 +13386,22 @@ async function boot() {
 	}
 }
 async function loadOverview() {
+	const context = state.current;
+	const request = ++viewRequest;
+	++detailRequest;
 	set({
 		overviewLoading: true,
+		tableLoading: false,
 		overviewError: "",
 		view: "overview",
 		detail: null,
-		nsFilter: "all"
+		filter: "",
+		nsFilter: "all",
+		statusFilter: "all"
 	});
 	try {
-		const r = await call("overview", { context: state.current });
+		const r = await call("overview", { context });
+		if (viewRequest !== request || state.current !== context) return;
 		if (!r.ok) {
 			set({
 				overviewLoading: false,
@@ -13201,28 +13414,34 @@ async function loadOverview() {
 			overview: r
 		});
 	} catch (e) {
-		set({
+		if (viewRequest === request && state.current === context) set({
 			overviewLoading: false,
 			overviewError: e?.message || String(e)
 		});
 	}
 }
-async function loadKind(kind) {
+async function loadKind(kind, statusFilter = "all", preserveFilters = false) {
+	const context = state.current;
+	const request = ++viewRequest;
+	++detailRequest;
 	set({
 		tableLoading: true,
+		overviewLoading: false,
 		tableError: "",
 		view: kind,
 		detail: null,
-		filter: "",
-		nsFilter: "all",
+		filter: preserveFilters ? state.filter : "",
+		nsFilter: preserveFilters ? state.nsFilter : "all",
+		statusFilter,
 		table: "",
 		items: []
 	});
 	try {
 		const r = await call("list", {
-			context: state.current,
+			context,
 			kind
 		});
+		if (viewRequest !== request || state.current !== context) return;
 		if (!r.ok) {
 			set({
 				tableLoading: false,
@@ -13238,7 +13457,7 @@ async function loadKind(kind) {
 			items: r.items || []
 		});
 	} catch (e) {
-		set({
+		if (viewRequest === request && state.current === context) set({
 			tableLoading: false,
 			tableError: e?.message || String(e),
 			table: "",
@@ -13249,7 +13468,9 @@ async function loadKind(kind) {
 async function loadDetail(kind, idx) {
 	const it = state.items[idx];
 	if (!it) return;
-	const d = {
+	const context = state.current;
+	const request = ++detailRequest;
+	set({ detail: {
 		kind,
 		name: it.name,
 		namespace: it.namespace,
@@ -13257,116 +13478,184 @@ async function loadDetail(kind, idx) {
 		yaml: "",
 		yamlLoading: true,
 		yamlError: ""
-	};
-	set({ detail: d });
+	} });
 	try {
 		const r = await call("yaml", {
-			context: state.current,
+			context,
 			kind,
 			namespace: it.namespace,
 			name: it.name
 		});
+		if (state.current !== context || detailRequest !== request || !state.detail) return;
 		if (!r.ok) set({ detail: {
-			...d,
+			...state.detail,
 			yamlLoading: false,
 			yamlError: r.error || "failed"
 		} });
 		else set({ detail: {
-			...d,
+			...state.detail,
 			yamlLoading: false,
 			yaml: r.yaml
 		} });
 	} catch (e) {
-		set({ detail: {
-			...d,
+		if (state.current === context && detailRequest === request && state.detail) set({ detail: {
+			...state.detail,
 			yamlLoading: false,
 			yamlError: e?.message || String(e)
 		} });
 	}
 }
 const icon = (t) => react.createElement("span", { className: "k8s-icon" }, t);
+function EmptyState({ title, hint, error = false, retry }) {
+	return react.createElement("div", {
+		className: "k8s-empty",
+		role: error ? "alert" : "status"
+	}, react.createElement("div", { className: "k8s-empty-title" + (error ? " k8s-error" : "") }, title), hint && react.createElement("div", { className: "k8s-empty-hint" }, hint), retry && react.createElement("button", {
+		className: "k8s-btn",
+		onClick: retry
+	}, "重新加载"));
+}
 function OverviewView() {
 	const s = useStore();
-	if (s.overviewLoading || !s.overview) return react.createElement("div", { className: "k8s-empty" }, "Loading overview…");
-	if (s.overviewError) return react.createElement("div", { className: "k8s-empty k8s-error" }, s.overviewError);
-	const ov = s.overview || {};
-	const podStats = ov.pods || {};
+	if (s.overviewError) return react.createElement(EmptyState, {
+		title: "无法读取集群概览",
+		hint: s.overviewError,
+		error: true,
+		retry: loadOverview
+	});
+	if (s.overviewLoading || !s.overview) return react.createElement(EmptyState, { title: "正在读取集群状态…" });
+	const ov = s.overview;
+	const pods = ov.pods || {};
 	const cards = [
 		{
-			value: (ov.nodes || {}).total || 0,
-			label: "Nodes",
-			color: ""
+			value: ov.nodes?.total || 0,
+			label: "节点总数",
+			hint: "查看集群节点",
+			kind: "nodes",
+			filter: "all",
+			tone: "neutral"
 		},
 		{
-			value: (ov.nodes || {}).ready || 0,
-			label: "Ready Nodes",
-			color: "k8s-status-ok"
+			value: ov.nodes?.ready || 0,
+			label: "就绪节点",
+			hint: "已准备好运行工作负载",
+			kind: "nodes",
+			filter: "Ready",
+			tone: "ok"
 		},
 		{
-			value: podStats.Running || 0,
-			label: "Running Pods",
-			color: "k8s-status-ok"
+			value: pods.Running || 0,
+			label: "运行中的 Pod",
+			hint: "查看运行中的工作负载",
+			kind: "pods",
+			filter: "Running",
+			tone: "ok"
 		},
 		{
-			value: podStats.Pending || 0,
-			label: "Pending Pods",
-			color: "k8s-status-warn"
+			value: pods.Pending || 0,
+			label: "等待中的 Pod",
+			hint: "检查调度或启动状态",
+			kind: "pods",
+			filter: "Pending",
+			tone: "warn"
 		},
 		{
-			value: podStats.Failed || 0,
-			label: "Failed Pods",
-			color: "k8s-status-err"
+			value: pods.Failed || 0,
+			label: "失败的 Pod",
+			hint: "检查故障工作负载",
+			kind: "pods",
+			filter: "Failed",
+			tone: "error"
 		},
 		{
 			value: ov.namespaces || 0,
-			label: "Namespaces",
-			color: ""
+			label: "命名空间",
+			hint: "查看资源隔离范围",
+			kind: "namespaces",
+			filter: "all",
+			tone: "neutral"
 		}
 	];
-	return react.createElement("div", { className: "k8s-content" }, react.createElement("div", { className: "k8s-title" }, "Cluster Overview"), react.createElement("div", { className: "k8s-stat-grid" }, cards.map((c, i) => react.createElement("div", {
-		key: i,
-		className: "k8s-stat-card"
-	}, react.createElement("div", { className: "k8s-stat-value " + (c.color || "") }, String(c.value)), react.createElement("div", { className: "k8s-stat-label" }, c.label)))), ov.serverVersion ? react.createElement("div", { className: "k8s-stat-label" }, "Server version: ", ov.serverVersion) : null);
+	return react.createElement("div", { className: "k8s-content" }, react.createElement("div", { className: "k8s-page-head" }, react.createElement("div", { className: "k8s-heading" }, react.createElement("h2", null, "集群概览"), react.createElement("p", { className: "k8s-subtitle" }, "快速了解集群状态，点击卡片查看对应资源。")), ov.serverVersion && react.createElement("span", { className: "k8s-badge neutral" }, ov.serverVersion)), react.createElement("div", { className: "k8s-stat-grid" }, cards.map((card) => react.createElement("button", {
+		key: card.label,
+		className: "k8s-stat-card",
+		type: "button",
+		onClick: () => loadKind(card.kind, card.filter)
+	}, react.createElement("span", { className: "k8s-stat-label" }, card.label), react.createElement("strong", { className: "k8s-stat-value k8s-status-" + card.tone }, card.value), react.createElement("span", { className: "k8s-subtitle" }, card.hint)))), react.createElement("div", { className: "k8s-summary" }, react.createElement("span", { className: "k8s-badge " + (pods.Pending || pods.Failed ? "warn" : "ok") }, pods.Pending || pods.Failed ? "有待关注的工作负载" : "工作负载运行正常"), react.createElement("span", { className: "k8s-subtitle" }, "点击刷新获取最新状态。")));
 }
-function ResourceTable({ ctx }) {
+function ResourceTable() {
 	const s = useStore();
-	if (s.tableLoading && !s.table) return react.createElement("div", { className: "k8s-empty" }, "Loading…");
-	if (s.tableError) return react.createElement("div", { className: "k8s-empty k8s-error" }, s.tableError);
-	const rows = (s.table || "").split("\n").filter((l) => l.trim());
-	const allNamespaces = ["all", ...Array.from(new Set(s.items.map((it) => it.namespace).filter(Boolean)))];
-	const activeNsFilter = allNamespaces.includes(s.nsFilter) ? s.nsFilter : "all";
-	const filteredRows = rows.slice(1).map((r, i) => ({
-		text: r,
-		idx: i
-	})).filter((row) => {
-		if (activeNsFilter === "all") return true;
-		const item = s.items[row.idx];
-		return item && item.namespace === activeNsFilter;
-	}).filter((row) => !s.filter || row.text.toLowerCase().includes(s.filter.toLowerCase()));
-	const header = rows[0] || "";
-	return react.createElement("div", { className: "k8s-content" }, react.createElement("div", { style: {
-		display: "flex",
-		gap: 12,
-		alignItems: "center",
-		marginBottom: 12,
-		flexWrap: "wrap"
-	} }, react.createElement("span", { className: "k8s-title" }, KIND_LABEL[s.view] || s.view), react.createElement("select", {
-		className: "k8s-select-small",
-		value: activeNsFilter,
+	if (s.tableLoading && !s.table) return react.createElement(EmptyState, { title: "正在读取资源…" });
+	if (s.tableError) return react.createElement(EmptyState, {
+		title: "无法读取资源",
+		hint: s.tableError,
+		error: true,
+		retry: () => loadKind(s.view)
+	});
+	const { headers, rows } = parseResourceTable(s.table, s.items);
+	const namespaces = ["all", ...Array.from(new Set(s.items.map((item) => item.namespace).filter(Boolean))).sort()];
+	const statuses = s.view === "pods" ? [
+		"Running",
+		"Pending",
+		"Failed",
+		"Succeeded",
+		"Unknown"
+	] : s.view === "nodes" ? ["Ready", "NotReady"] : [];
+	const filtered = rows.filter((row) => {
+		const item = s.items[row.itemIndex];
+		return (s.nsFilter === "all" || item?.namespace === s.nsFilter) && (s.statusFilter === "all" || (s.view === "nodes" ? item?.ready ? "Ready" : "NotReady" : item?.phase) === s.statusFilter) && (!s.filter || row.cells.join(" ").toLowerCase().includes(s.filter.toLowerCase()));
+	});
+	return react.createElement("div", { className: "k8s-content" }, react.createElement("div", { className: "k8s-page-head" }, react.createElement("div", { className: "k8s-heading" }, react.createElement("h2", null, KIND_LABEL[s.view] || s.view), react.createElement("p", { className: "k8s-subtitle" }, "点击资源名称查看 YAML" + (s.view === "pods" ? "、日志或进入终端。" : " 和管理操作。"))), react.createElement("span", { className: "k8s-count" }, `${s.items.length} 个资源`)), react.createElement("div", { className: "k8s-toolbar" }, namespaces.length > 1 && react.createElement("select", {
+		className: "k8s-select",
+		"aria-label": "筛选命名空间",
+		value: s.nsFilter,
 		onChange: (e) => set({ nsFilter: e.target.value })
-	}, allNamespaces.map((ns) => react.createElement("option", {
+	}, namespaces.map((ns) => react.createElement("option", {
 		key: ns,
 		value: ns
-	}, ns === "all" ? "All namespaces" : ns))), react.createElement("input", {
+	}, ns === "all" ? "全部命名空间" : ns))), statuses.length > 0 && react.createElement("select", {
+		className: "k8s-select-small",
+		"aria-label": s.view === "pods" ? "筛选 Pod 阶段" : "筛选节点状态",
+		value: s.statusFilter,
+		onChange: (e) => set({ statusFilter: e.target.value })
+	}, ["all", ...statuses].map((status) => react.createElement("option", {
+		key: status,
+		value: status
+	}, status === "all" ? s.view === "pods" ? "全部阶段" : "全部状态" : status))), react.createElement("div", { className: "k8s-search" }, react.createElement("input", {
 		className: "k8s-filter",
-		placeholder: "Filter rows…",
+		type: "search",
+		placeholder: "搜索资源名称、状态…",
+		"aria-label": "搜索资源",
 		value: s.filter,
 		onChange: (e) => set({ filter: e.target.value })
-	})), react.createElement("div", { className: "k8s-table-wrap" }, react.createElement("div", { className: "k8s-table-header" }, header), react.createElement("div", { className: "k8s-table-rows" }, react.createElement("pre", { className: "k8s-table" }, filteredRows.map((row) => react.createElement("div", {
-		key: row.idx,
-		className: "k8s-row " + (s.detail && s.items[row.idx] && s.detail.name === s.items[row.idx].name ? "active" : ""),
-		onClick: () => loadDetail(s.view, row.idx)
-	}, row.text))))));
+	})), (s.filter || s.nsFilter !== "all" || s.statusFilter !== "all") && react.createElement("button", {
+		className: "k8s-btn",
+		onClick: () => set({
+			filter: "",
+			nsFilter: "all",
+			statusFilter: "all"
+		})
+	}, "清除筛选")), react.createElement("div", { className: "k8s-table-wrap" }, react.createElement("div", { className: "k8s-table-scroll" }, react.createElement("table", {
+		className: "k8s-table",
+		"aria-label": KIND_LABEL[s.view]
+	}, react.createElement("thead", null, react.createElement("tr", null, headers.map((header) => react.createElement("th", {
+		key: header,
+		scope: "col"
+	}, header)))), react.createElement("tbody", null, filtered.map((row) => {
+		const item = s.items[row.itemIndex];
+		const active = item && s.detail?.name === item.name && s.detail.namespace === item.namespace;
+		return react.createElement("tr", {
+			key: row.itemIndex >= 0 ? `${item.namespace}/${item.name}` : row.cells.join("|"),
+			className: active ? "active" : ""
+		}, row.cells.map((cell, index) => react.createElement("td", { key: index }, headers[index] === "NAME" && item ? react.createElement("button", {
+			className: "k8s-resource-name",
+			onClick: () => loadDetail(s.view, row.itemIndex),
+			title: item.name
+		}, cell) : ["STATUS", "READY"].includes(headers[index]) ? react.createElement("span", { className: "k8s-badge " + statusTone(cell) }, cell) : cell)));
+	}))), filtered.length === 0 && react.createElement(EmptyState, {
+		title: rows.length ? "没有匹配的资源" : "暂无资源",
+		hint: rows.length ? "试试其他关键词或命名空间。" : "当前集群中没有此类资源。"
+	})), react.createElement("div", { className: "k8s-table-footer" }, `显示 ${filtered.length} / ${rows.length} 个资源`)));
 }
 const SCALABLE = [
 	"deployments",
@@ -13424,30 +13713,46 @@ function DetailDrawer() {
 			alert("扩缩容失败: " + (e?.message || String(e)));
 		}
 	}
-	return react.createElement("div", { className: "k8s-detail" }, react.createElement("div", { className: "k8s-detail-head" }, react.createElement("div", null, react.createElement("div", { className: "k8s-title" }, d.name), react.createElement("div", { style: {
-		fontSize: 12,
-		color: "var(--dsw-alias-label-secondary)"
-	} }, d.namespace || "cluster-scoped"), react.createElement("div", { className: "k8s-tabs" }, tabs.map((t) => react.createElement("div", {
+	return react.createElement("section", {
+		className: "k8s-detail",
+		"aria-label": "资源详情"
+	}, react.createElement("div", { className: "k8s-detail-head" }, react.createElement("div", null, react.createElement("div", { className: "k8s-title" }, d.name), react.createElement("div", { className: "k8s-detail-meta" }, `${KIND_LABEL[d.kind]} · ${d.namespace || "集群级资源"}`), react.createElement("div", {
+		className: "k8s-tabs",
+		role: "tablist",
+		"aria-label": "资源详情视图"
+	}, tabs.map((t) => react.createElement("button", {
 		key: t,
 		className: "k8s-tab " + (d.tab === t ? "active" : ""),
+		role: "tab",
+		"aria-selected": d.tab === t,
 		onClick: () => set({ detail: {
 			...d,
 			tab: t
 		} })
-	}, t)))), react.createElement("div", { style: {
-		display: "flex",
-		gap: 8,
-		alignItems: "center"
-	} }, RESTARTABLE.includes(d.kind) ? react.createElement("button", {
+	}, {
+		yaml: "YAML",
+		logs: "日志",
+		shell: "终端"
+	}[t])))), react.createElement("div", { className: "k8s-actions" }, RESTARTABLE.includes(d.kind) ? react.createElement("button", {
 		className: "k8s-btn k8s-btn-warn",
 		onClick: onRestart
-	}, "Restart") : null, SCALABLE.includes(d.kind) ? react.createElement("button", {
+	}, "重启") : null, SCALABLE.includes(d.kind) ? react.createElement("button", {
 		className: "k8s-btn",
 		onClick: onScale
-	}, "Scale") : null, react.createElement("button", {
-		className: "k8s-btn",
+	}, "扩缩容") : null, react.createElement("button", {
+		className: "k8s-btn k8s-icon-btn",
+		"aria-label": "关闭资源详情",
 		onClick: () => set({ detail: null })
-	}, "×"))), react.createElement("div", { className: "k8s-detail-body" }, d.tab === "yaml" ? react.createElement(YamlTab, d) : d.tab === "shell" ? react.createElement(ShellTab, d) : react.createElement(LogsTab, d)));
+	}, "×"))), react.createElement("div", { className: "k8s-detail-body" }, d.tab === "yaml" ? react.createElement(YamlTab, {
+		...d,
+		key: d.namespace + "/" + d.name
+	}) : d.tab === "shell" ? react.createElement(ShellTab, {
+		...d,
+		key: d.namespace + "/" + d.name
+	}) : react.createElement(LogsTab, {
+		...d,
+		key: d.namespace + "/" + d.name
+	})));
 }
 function YamlTab(d) {
 	const [editing, setEditing] = react.useState(false);
@@ -13456,7 +13761,7 @@ function YamlTab(d) {
 	react.useEffect(() => {
 		if (!editing) setDraft(d.yaml || "");
 	}, [d.yaml, editing]);
-	if (d.yamlLoading) return react.createElement("div", { className: "k8s-empty" }, "Loading YAML…");
+	if (d.yamlLoading) return react.createElement("div", { className: "k8s-empty" }, "正在读取 YAML…");
 	if (d.yamlError) return react.createElement("div", { className: "k8s-empty k8s-error" }, d.yamlError);
 	async function onApply() {
 		if (!confirm("确认应用修改后的 YAML? 请确保你在测试资源上操作。")) return;
@@ -13479,15 +13784,16 @@ function YamlTab(d) {
 		className: "k8s-btn",
 		onClick: () => setEditing(false),
 		disabled: applying
-	}, "Cancel"), react.createElement("button", {
+	}, "取消"), react.createElement("button", {
 		className: "k8s-btn k8s-btn-primary",
 		onClick: onApply,
 		disabled: applying
-	}, applying ? "Applying…" : "Apply")) : react.createElement("button", {
+	}, applying ? "正在应用…" : "应用修改")) : react.createElement("button", {
 		className: "k8s-btn",
 		onClick: () => setEditing(true)
-	}, "Edit YAML")), editing ? react.createElement("div", { className: "k8s-detail-scroll" }, react.createElement("textarea", {
+	}, "编辑 YAML")), editing ? react.createElement("div", { className: "k8s-detail-scroll" }, react.createElement("textarea", {
 		className: "k8s-textarea",
+		"aria-label": "编辑资源 YAML",
 		style: { height: "100%" },
 		value: draft,
 		onChange: (e) => setDraft(e.target.value),
@@ -13499,8 +13805,20 @@ function LogsTab(d) {
 	const [container, setContainer] = react.useState("");
 	const [lines, setLines] = react.useState("");
 	const [following, setFollowing] = react.useState(false);
+	const [starting, setStarting] = react.useState(false);
 	const [error, setError] = react.useState("");
 	const [sessionId, setSessionId] = react.useState(null);
+	const logSessionRef = react.useRef(null);
+	const mountedRef = react.useRef(true);
+	const startingRef = react.useRef(false);
+	react.useEffect(() => {
+		mountedRef.current = true;
+		return () => {
+			mountedRef.current = false;
+			if (logSessionRef.current) call("logs/stop", { sessionId: logSessionRef.current }).catch(() => {});
+			logSessionRef.current = null;
+		};
+	}, []);
 	react.useEffect(() => {
 		let alive = true;
 		call("pod-containers", {
@@ -13516,6 +13834,8 @@ function LogsTab(d) {
 			const c = r.containers || [];
 			setContainers(c);
 			if (c.length) setContainer(c[0]);
+		}).catch((e) => {
+			if (alive) setError(String(e?.message || e));
 		});
 		return () => {
 			alive = false;
@@ -13523,14 +13843,33 @@ function LogsTab(d) {
 	}, [d.name, d.namespace]);
 	react.useEffect(() => {
 		if (!following || !sessionId) return;
+		let active = true;
+		let polling = false;
 		const iv = setInterval(() => {
+			if (polling) return;
+			polling = true;
 			call("logs/poll", { sessionId }).then((r) => {
-				if (r.ok && r.delta) setLines((prev) => prev + r.delta);
+				if (!active) return;
+				if (!r.ok) {
+					setError(r.error || "读取日志失败");
+					return;
+				}
+				if (r.ok && r.delta) setLines((prev) => (prev + r.delta).slice(-1048576));
+			}).catch((e) => {
+				if (active) setError(String(e?.message || e));
+			}).finally(() => {
+				polling = false;
 			});
 		}, 1e3);
-		return () => clearInterval(iv);
+		return () => {
+			active = false;
+			clearInterval(iv);
+		};
 	}, [following, sessionId]);
 	async function startFollow() {
+		if (startingRef.current || logSessionRef.current || !container) return;
+		startingRef.current = true;
+		setStarting(true);
 		setError("");
 		try {
 			const r = await call("logs/start", {
@@ -13540,26 +13879,40 @@ function LogsTab(d) {
 				container
 			});
 			if (!r.ok) {
-				setError(r.error || "failed");
+				if (mountedRef.current) setError(r.error || "读取日志失败");
 				return;
 			}
+			if (!mountedRef.current) {
+				call("logs/stop", { sessionId: r.sessionId }).catch(() => {});
+				return;
+			}
+			logSessionRef.current = r.sessionId;
 			setSessionId(r.sessionId);
 			setFollowing(true);
 			setLines("");
 		} catch (e) {
-			setError(e?.message || String(e));
+			if (mountedRef.current) setError(e?.message || String(e));
+		} finally {
+			startingRef.current = false;
+			if (mountedRef.current) setStarting(false);
 		}
 	}
 	async function stopFollow() {
-		if (sessionId) try {
-			await call("logs/stop", { sessionId });
-		} catch (e) {}
+		const id = logSessionRef.current;
 		setFollowing(false);
+		logSessionRef.current = null;
 		setSessionId(null);
+		if (id) try {
+			await call("logs/stop", { sessionId: id });
+		} catch (e) {
+			if (mountedRef.current) setError(e?.message || String(e));
+		}
 	}
 	return react.createElement("div", { className: "k8s-detail-panel" }, react.createElement("div", { className: "k8s-log-controls" }, react.createElement("select", {
 		className: "k8s-select-small",
+		"aria-label": "选择容器",
 		value: container,
+		disabled: following || starting || !containers.length,
 		onChange: (e) => {
 			setContainer(e.target.value);
 			setLines("");
@@ -13569,19 +13922,22 @@ function LogsTab(d) {
 		value: c
 	}, c))), react.createElement("button", {
 		className: "k8s-btn " + (following ? "k8s-btn-primary" : ""),
-		onClick: following ? stopFollow : startFollow
-	}, following ? "Stop" : "Follow"), error ? react.createElement("span", {
+		onClick: following ? stopFollow : startFollow,
+		disabled: starting || !container
+	}, starting ? "正在连接…" : following ? "停止跟随" : "跟随日志"), error ? react.createElement("span", {
 		className: "k8s-error",
 		style: { fontSize: 12 }
-	}, error) : null), react.createElement("div", { className: "k8s-detail-scroll" }, react.createElement("pre", { className: "k8s-logs" }, lines || "No logs yet.")));
+	}, error) : null), react.createElement("div", { className: "k8s-detail-scroll" }, react.createElement("pre", { className: "k8s-logs" }, lines || "选择容器并点击“跟随日志”开始读取。")));
 }
 function ShellTab(d) {
 	const [containers, setContainers] = react.useState([]);
 	const [container, setContainer] = react.useState("");
 	const [error, setError] = react.useState("");
 	const [connected, setConnected] = react.useState(false);
+	const [connecting, setConnecting] = react.useState(false);
 	const termRef = react.useRef(null);
 	const wsRef = react.useRef(null);
+	const disposeTerminal = react.useRef(null);
 	react.useEffect(() => {
 		let alive = true;
 		call("pod-containers", {
@@ -13597,97 +13953,180 @@ function ShellTab(d) {
 			const c = r.containers || [];
 			setContainers(c);
 			if (c.length) setContainer(c[0]);
+		}).catch((e) => {
+			if (alive) setError(String(e?.message || e));
 		});
 		return () => {
 			alive = false;
 		};
 	}, [d.name, d.namespace]);
-	async function connect() {
-		if (wsRef.current) {
-			wsRef.current.close();
-			wsRef.current = null;
+	function cleanup() {
+		const ws = wsRef.current;
+		wsRef.current = null;
+		if (ws) {
+			ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null;
+			ws.close();
 		}
+		disposeTerminal.current?.();
+		disposeTerminal.current = null;
+	}
+	function disconnect() {
+		cleanup();
+		setConnected(false);
+		setConnecting(false);
+	}
+	function connect() {
+		if (wsRef.current || !container) return;
+		cleanup();
 		setError("");
 		if (!termRef.current) return;
+		setConnecting(true);
 		const mount = document.createElement("div");
 		mount.style.width = "100%";
 		mount.style.height = "100%";
-		mount.style.minHeight = "240px";
 		mount.style.outline = "none";
 		mount.tabIndex = 0;
 		termRef.current.appendChild(mount);
 		const term = new import_xterm.Terminal({
 			fontSize: 13,
 			cursorBlink: true,
-			theme: {
-				background: "#000000",
-				foreground: "#e0e0e0"
-			}
+			allowTransparency: true,
+			theme: { background: "#00000000" }
 		});
+		const fit = new import_addon_fit.FitAddon();
+		term.loadAddon(fit);
 		term.open(mount);
-		term.write("Connecting...\r\n");
+		let ws;
+		let ready = false;
+		let disposed = false;
+		let exitReason = "";
+		const sendSize = () => {
+			if (ready && ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({
+				type: "resize",
+				cols: term.cols,
+				rows: term.rows
+			}));
+		};
+		const sizeListener = term.onResize(sendSize);
+		const stopTheme = watchTerminalTheme(term, mount);
+		fit.fit();
+		const resize = new ResizeObserver(() => {
+			if (!disposed && mount.isConnected) fit.fit();
+		});
+		resize.observe(mount);
+		disposeTerminal.current = () => {
+			disposed = true;
+			ready = false;
+			sizeListener.dispose();
+			stopTheme();
+			resize.disconnect();
+			term.dispose();
+			mount.remove();
+		};
+		term.write("正在连接容器…\r\n");
 		term.focus();
 		mount.addEventListener("click", () => term.focus());
-		const wsUrl = `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/dsh-k8s-manager/ws/shell?cluster=${encodeURIComponent(state.current)}&namespace=${encodeURIComponent(d.namespace)}&pod=${encodeURIComponent(d.name)}&container=${encodeURIComponent(container)}`;
-		const ws = new WebSocket(wsUrl);
+		const transport = globalThis.__DSH_TRANSPORT__;
+		const streamUrl = new URL("/dsh-k8s-manager/ws/shell", transport?.streamBaseUrl ?? document.baseURI);
+		streamUrl.protocol = streamUrl.protocol === "https:" ? "wss:" : "ws:";
+		const wsUrl = streamUrl.href + `?cluster=${encodeURIComponent(state.current)}&namespace=${encodeURIComponent(d.namespace)}&pod=${encodeURIComponent(d.name)}&container=${encodeURIComponent(container)}&protocol=2&cols=${term.cols}&rows=${term.rows}`;
+		ws = new WebSocket(wsUrl);
+		ws.binaryType = "arraybuffer";
 		wsRef.current = ws;
 		ws.onopen = () => {
-			setConnected(true);
 			term.focus();
 		};
 		ws.onmessage = (e) => {
-			term.write(typeof e.data === "string" ? e.data : new Uint8Array(e.data));
+			if (typeof e.data !== "string") {
+				term.write(new Uint8Array(e.data));
+				return;
+			}
+			let message;
+			try {
+				message = JSON.parse(e.data);
+			} catch {
+				term.write(e.data);
+				return;
+			}
+			if (message.type === "ready") {
+				ready = true;
+				setConnecting(false);
+				setConnected(true);
+				fit.fit();
+				sendSize();
+				term.focus();
+			} else if (message.type === "output" && typeof message.data === "string") term.write(message.data);
+			else if (message.type === "error") {
+				ready = false;
+				setError(message.message || "终端启动失败");
+				setConnecting(false);
+				setConnected(false);
+				term.write(`\r\n[${message.message || "终端启动失败"}]\r\n`);
+			} else if (message.type === "exit") exitReason = `进程退出 ${message.code ?? message.signal ?? ""}`;
 		};
 		ws.onclose = (e) => {
+			ready = false;
+			wsRef.current = null;
+			setConnecting(false);
 			setConnected(false);
-			term.write(`\r\n[disconnected ${e.code}]`);
+			term.write(`\r\n[${exitReason || "连接已断开 " + e.code}]`);
 		};
 		ws.onerror = (e) => {
-			setError("WebSocket error: " + (e?.message || "unknown"));
+			setError("终端连接失败：" + (e?.message || "请检查容器状态和集群连接"));
+			setConnecting(false);
 			setConnected(false);
 		};
 		term.onData((data) => {
-			if (ws.readyState === 1) ws.send(data);
+			if (ready && ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({
+				type: "input",
+				data
+			}));
 		});
 	}
 	react.useEffect(() => {
 		return () => {
-			if (wsRef.current) {
-				wsRef.current.close();
-				wsRef.current = null;
-			}
+			cleanup();
 		};
 	}, []);
 	return react.createElement("div", { className: "k8s-detail-panel" }, react.createElement("div", { className: "k8s-log-controls" }, react.createElement("select", {
 		className: "k8s-select-small",
+		"aria-label": "选择容器",
 		value: container,
+		disabled: connected || connecting || !containers.length,
 		onChange: (e) => setContainer(e.target.value)
 	}, containers.map((c) => react.createElement("option", {
 		key: c,
 		value: c
 	}, c))), react.createElement("button", {
-		className: "k8s-btn k8s-btn-primary",
-		onClick: connect,
-		disabled: connected
-	}, connected ? "Connected" : "Connect"), error ? react.createElement("span", {
+		className: "k8s-btn " + (connected ? "" : "k8s-btn-primary"),
+		onClick: connected ? disconnect : connect,
+		disabled: connecting || !container
+	}, connecting ? "正在连接…" : connected ? "断开连接" : "连接终端"), connected && react.createElement("span", { className: "k8s-badge ok" }, "已连接"), error ? react.createElement("span", {
 		className: "k8s-error",
 		style: { fontSize: 12 }
 	}, error) : null), react.createElement("div", {
 		ref: termRef,
-		className: "k8s-detail-scroll",
-		style: {
-			background: "#000000",
-			padding: 8
-		}
-	}));
+		className: "k8s-detail-scroll k8s-terminal"
+	}, !connected && !connecting && !disposeTerminal.current && react.createElement("div", { className: "k8s-terminal-placeholder" }, "选择容器并点击“连接终端”。")));
 }
-function Workbench({ ctx }) {
+function Workbench() {
 	const s = useStore();
 	const [showInput, setShowInput] = react.useState(false);
 	const [yaml, setYaml] = react.useState("");
 	const [clusterName, setClusterName] = react.useState("");
 	const [saving, setSaving] = react.useState(false);
 	const [configs, setConfigs] = react.useState([]);
+	const dialogRef = react.useRef(null);
+	react.useEffect(() => {
+		if (showInput && !dialogRef.current?.open) dialogRef.current?.showModal();
+	}, [showInput]);
+	react.useEffect(() => {
+		const close = (event) => {
+			if (event.key === "Escape" && !showInput) set({ detail: null });
+		};
+		document.addEventListener("keydown", close);
+		return () => document.removeEventListener("keydown", close);
+	}, [showInput]);
 	function loadConfigs() {
 		call("list-kubeconfigs").then((r) => {
 			if (r.ok) setConfigs(r.configs || []);
@@ -13741,138 +14180,134 @@ function Workbench({ ctx }) {
 			alert("删除失败: " + (e?.message || String(e)));
 		}
 	}
-	return react.createElement("div", { className: "k8s-view" }, react.createElement("div", { className: "k8s-topbar" }, react.createElement("span", { className: "k8s-title" }, icon("☸"), "Kubernetes"), react.createElement("select", {
+	return react.createElement("div", { className: "k8s-view" }, react.createElement("header", { className: "k8s-topbar" }, react.createElement("div", { className: "k8s-heading" }, react.createElement("span", { className: "k8s-title" }, icon("☸"), "Kubernetes"), react.createElement("span", { className: "k8s-subtitle" }, "集群与工作负载管理")), react.createElement("label", { className: "k8s-cluster-picker" }, react.createElement("span", { className: "k8s-subtitle" }, "当前集群"), react.createElement("select", {
 		className: "k8s-select",
+		"aria-label": "切换集群",
 		value: s.current,
+		disabled: !s.configs.length,
 		onChange: onContextChange
-	}, s.configs.map((c) => react.createElement("option", {
+	}, !s.configs.length && react.createElement("option", { value: "" }, "尚未添加集群"), s.configs.map((c) => react.createElement("option", {
 		key: c,
 		value: c
-	}, c))), react.createElement("button", {
+	}, c)))), react.createElement("div", { className: "k8s-actions" }, react.createElement("button", {
 		className: "k8s-btn",
-		onClick: () => {
-			if (s.view === "overview") loadOverview();
-			else loadKind(s.view);
-		}
-	}, "Refresh"), react.createElement("button", {
-		className: "k8s-btn",
+		disabled: s.boot !== "ready" || s.overviewLoading || s.tableLoading,
+		onClick: () => s.view === "overview" ? loadOverview() : loadKind(s.view, s.statusFilter, true)
+	}, s.overviewLoading || s.tableLoading ? "正在刷新…" : "刷新"), react.createElement("button", {
+		className: "k8s-btn k8s-btn-primary",
 		onClick: () => setShowInput(true)
-	}, "Add Config")), showInput ? react.createElement("div", { className: "k8s-config-overlay" }, react.createElement("div", {
+	}, "管理集群"))), showInput ? react.createElement("dialog", {
+		ref: dialogRef,
+		className: "k8s-config-overlay",
+		"aria-labelledby": "k8s-config-title",
+		onCancel: () => setShowInput(false)
+	}, react.createElement("div", {
 		className: "k8s-config-area",
 		style: { maxHeight: "85vh" }
-	}, react.createElement("div", { className: "k8s-title" }, "Add Kubernetes Cluster"), react.createElement("input", {
+	}, react.createElement("div", { className: "k8s-config-heading" }, react.createElement("div", { className: "k8s-heading" }, react.createElement("h2", { id: "k8s-config-title" }, "管理集群"), react.createElement("p", { className: "k8s-subtitle" }, "添加 kubeconfig，即可在不同集群间切换。")), react.createElement("button", {
+		className: "k8s-btn k8s-icon-btn",
+		"aria-label": "关闭集群管理",
+		onClick: () => setShowInput(false)
+	}, "×")), react.createElement("label", { className: "k8s-field" }, "集群名称", react.createElement("input", {
 		className: "k8s-filter",
 		style: { maxWidth: "100%" },
-		placeholder: "Cluster config name (e.g. cluster-a)",
+		"aria-label": "集群名称",
+		autoFocus: true,
+		placeholder: "集群名称，例如 staging 或 production",
 		value: clusterName,
 		onChange: (e) => setClusterName(e.target.value),
 		disabled: saving
-	}), react.createElement("textarea", {
+	})), react.createElement("label", { className: "k8s-field" }, "kubeconfig", react.createElement("textarea", {
 		className: "k8s-textarea",
 		style: { minHeight: 240 },
+		"aria-label": "集群 kubeconfig 内容",
 		value: yaml,
 		onChange: (e) => setYaml(e.target.value),
 		placeholder: "apiVersion: v1\nkind: Config\n...",
 		disabled: saving
-	}), configs.length > 0 ? react.createElement("div", { className: "k8s-config-list" }, react.createElement("div", {
+	})), configs.length > 0 ? react.createElement("div", { className: "k8s-config-list" }, react.createElement("div", {
 		className: "k8s-title",
 		style: { fontSize: 13 }
-	}, "Saved configs"), configs.map((name) => react.createElement("div", {
+	}, "已保存的集群"), configs.map((name) => react.createElement("div", {
 		key: name,
 		className: "k8s-config-item"
 	}, react.createElement("span", null, name), react.createElement("button", {
 		className: "k8s-btn k8s-btn-warn",
 		onClick: () => deleteConfig(name)
-	}, "Delete")))) : null, react.createElement("div", { className: "k8s-config-actions" }, react.createElement("button", {
+	}, "删除")))) : null, react.createElement("div", { className: "k8s-config-actions" }, react.createElement("button", {
 		className: "k8s-btn",
 		onClick: () => setShowInput(false),
 		disabled: saving
-	}, "Cancel"), react.createElement("button", {
+	}, "取消"), react.createElement("button", {
 		className: "k8s-btn k8s-btn-primary",
 		onClick: saveKubeconfig,
-		disabled: saving
-	}, saving ? "Saving…" : "Save")))) : null, react.createElement("div", { className: "k8s-body" }, react.createElement("div", { className: "k8s-sidebar" }, TREE.map((g) => react.createElement("div", { key: g.group }, react.createElement("div", { className: "k8s-tree-group" }, g.group), g.items.map(([key, label]) => react.createElement("div", {
+		disabled: saving || !yaml.trim()
+	}, saving ? "正在保存…" : "保存集群")))) : null, react.createElement("div", { className: "k8s-body" }, react.createElement("nav", {
+		className: "k8s-sidebar",
+		"aria-label": "Kubernetes 资源类型"
+	}, TREE.map((g) => react.createElement("div", { key: g.group }, react.createElement("div", { className: "k8s-tree-group" }, g.group), g.items.map(([key, label]) => react.createElement("button", {
 		key,
+		type: "button",
+		"aria-current": s.view === key ? "page" : void 0,
+		disabled: s.boot !== "ready",
 		className: "k8s-tree-item " + (s.view === key ? "active" : ""),
 		onClick: () => key === "overview" ? loadOverview() : loadKind(key)
-	}, label))))), s.boot === "no-kubectl" ? react.createElement("div", { className: "k8s-main" }, react.createElement("div", { className: "k8s-empty" }, react.createElement("div", null, "kubectl not found"), react.createElement("div", { style: {
-		fontSize: 13,
-		maxWidth: 460,
-		textAlign: "center",
-		lineHeight: 1.5
-	} }, "Please install kubectl and make sure it is on PATH. This plugin uses your local kubectl + kubeconfig."))) : null, s.boot === "no-contexts" ? react.createElement("div", { className: "k8s-main" }, react.createElement("div", { className: "k8s-empty k8s-error" }, "No kubeconfig contexts found. Please run kubectl config use-context or set KUBECONFIG.")) : null, s.boot === "error" ? react.createElement("div", { className: "k8s-main" }, react.createElement("div", { className: "k8s-empty k8s-error" }, s.bootError || "Unknown error")) : null, s.boot === "loading" || s.boot === "idle" ? react.createElement("div", { className: "k8s-main" }, react.createElement("div", { className: "k8s-empty" }, s.boot === "loading" ? "Connecting to Kubernetes…" : "Initializing…")) : null, s.boot === "ready" ? react.createElement("div", { className: "k8s-main" }, s.view === "overview" ? react.createElement(OverviewView) : react.createElement(ResourceTable, { ctx })) : null, s.detail ? react.createElement(DetailDrawer) : null));
+	}, label))))), s.boot === "no-kubectl" ? react.createElement("div", { className: "k8s-main" }, react.createElement(EmptyState, {
+		title: "未找到 kubectl",
+		hint: "安装 kubectl 并确保 DSH 可以从 PATH 访问它。",
+		retry: boot
+	})) : null, s.boot === "no-contexts" ? react.createElement("div", { className: "k8s-main" }, react.createElement(EmptyState, {
+		title: "添加您的第一个集群",
+		hint: "点击右上角“管理集群”，粘贴 kubeconfig 开始使用。"
+	})) : null, s.boot === "error" ? react.createElement("div", { className: "k8s-main" }, react.createElement(EmptyState, {
+		title: "连接失败",
+		hint: s.bootError,
+		error: true,
+		retry: boot
+	})) : null, s.boot === "loading" || s.boot === "idle" ? react.createElement("div", { className: "k8s-main" }, react.createElement(EmptyState, { title: "正在连接集群…" })) : null, s.boot === "ready" ? react.createElement("div", { className: "k8s-main" }, s.view === "overview" ? react.createElement(OverviewView) : react.createElement(ResourceTable)) : null, s.detail ? react.createElement(DetailDrawer) : null));
 }
 function apply(ctx) {
 	const slots = ctx.get("slots");
 	if (slots === void 0) return;
-	const css = `
-    .k8s-view { display:flex; flex-direction:column; height:100%; max-height:calc(100vh - 100px); min-height:0; width:100%; background:var(--dsw-alias-bg-base); color:var(--dsw-alias-label-primary); overflow:hidden; }
-    .k8s-topbar { display:flex; align-items:center; gap:12px; padding:10px 16px; border-bottom:1px solid var(--dsw-alias-border-l1); background:var(--dsw-alias-bg-layer-1); }
-    .k8s-body { display:flex; flex:1; min-height:0; overflow:hidden; }
-    .k8s-sidebar { width:240px; flex:0 0 240px; overflow:auto; border-right:1px solid var(--dsw-alias-border-l1); background:var(--dsw-specific-sidebar-fill, var(--dsw-alias-bg-layer-1)); padding:12px 8px; }
-    .k8s-main { flex:1; min-width:0; display:flex; flex-direction:column; overflow:hidden; }
-    .k8s-content { flex:1; display:flex; flex-direction:column; overflow:hidden; padding:16px; }
-    .k8s-detail { width:45%; max-width:600px; flex:0 0 45%; height:100%; border-left:1px solid var(--dsw-alias-border-l1); background:var(--dsw-alias-bg-layer-1); overflow:hidden; box-sizing:border-box; display:flex; flex-direction:column; }
-    .k8s-detail-head { flex:0 0 auto; }
-    .k8s-detail-body { flex:1; min-height:0; overflow:hidden; display:flex; flex-direction:column; }
-    .k8s-detail-panel { display:flex; flex-direction:column; flex:1; min-height:0; }
-    .k8s-detail-scroll { flex:1; min-height:0; overflow:auto; }
-    .k8s-title { font-weight:600; font-size:15px; display:flex; align-items:center; gap:8px; }
-    .k8s-select { background:var(--dsw-alias-bg-layer-2); color:var(--dsw-alias-label-primary); border:1px solid var(--dsw-alias-border-l2); border-radius:5px; padding:4px 8px; font-size:13px; max-width:260px; }
-    .k8s-btn { padding:5px 10px; border-radius:5px; border:1px solid var(--dsw-alias-border-l2); background:var(--dsw-alias-bg-layer-2); color:var(--dsw-alias-label-primary); cursor:pointer; font-size:12px; }
-    .k8s-btn:hover { background:var(--dsw-alias-interactive-bg-hover); }
-    .k8s-btn-primary { background:var(--dsw-alias-brand-primary); border-color:var(--dsw-alias-brand-primary); color:var(--dsw-alias-label-primary-inverted, #fff); }
-    .k8s-btn-warn { background:var(--dsw-alias-state-error-primary); border-color:var(--dsw-alias-state-error-primary); color:var(--dsw-alias-label-primary-inverted, #fff); }
-    .k8s-tree-group { font-size:11px; text-transform:uppercase; letter-spacing:.5px; color:var(--dsw-alias-label-secondary); margin:12px 8px 6px; font-weight:600; }
-    .k8s-tree-item { padding:5px 10px 5px 16px; border-radius:5px; cursor:pointer; font-size:13px; color:var(--dsw-alias-label-primary); }
-    .k8s-tree-item:hover { background:var(--dsw-alias-interactive-bg-hover); }
-    .k8s-tree-item.active { background:var(--dsw-specific-sidebar-nav-item-active, var(--dsw-alias-interactive-bg-active)); color:var(--dsw-alias-brand-primary); }
-    .k8s-stat-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(180px,1fr)); gap:12px; margin-bottom:16px; }
-    .k8s-stat-card { background:var(--dsw-alias-bg-layer-2); border:1px solid var(--dsw-alias-border-l1); border-radius:8px; padding:14px; }
-    .k8s-stat-value { font-size:22px; font-weight:600; }
-    .k8s-stat-label { font-size:12px; color:var(--dsw-alias-label-secondary); margin-top:4px; }
-    .k8s-table-wrap { background:var(--dsw-alias-bg-layer-1); border:1px solid var(--dsw-alias-border-l1); border-radius:8px; display:flex; flex-direction:column; flex:1; overflow:hidden; }
-    .k8s-table-header { font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size:12px; line-height:1.6; font-weight:600; padding:12px 12px 8px; border-bottom:1px solid var(--dsw-alias-border-l2); background:var(--dsw-alias-bg-layer-2); white-space:pre; }
-    .k8s-table-rows { flex:1; overflow:auto; padding:8px 0; }
-    .k8s-table { font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size:12px; line-height:1.6; margin:0; white-space:pre; padding:0 12px; color:var(--dsw-alias-label-primary); }
-    .k8s-row { cursor:pointer; }
-    .k8s-row:hover { background:var(--dsw-alias-interactive-bg-hover); }
-    .k8s-row.active { background:var(--dsw-alias-interactive-bg-active); }
-    .k8s-filter { width:100%; max-width:360px; padding:6px 10px; border:1px solid var(--dsw-alias-border-l2); border-radius:5px; background:var(--dsw-alias-bg-layer-2); color:var(--dsw-alias-label-primary); font-size:13px; }
-    .k8s-detail-head { display:flex; align-items:center; justify-content:space-between; padding:12px 16px; border-bottom:1px solid var(--dsw-alias-border-l1); background:var(--dsw-alias-bg-layer-2); }
-    .k8s-tabs { display:flex; gap:8px; margin-top:8px; }
-    .k8s-tab { padding:3px 10px; border-radius:4px; cursor:pointer; font-size:12px; color:var(--dsw-alias-label-secondary); }
-    .k8s-tab.active { background:var(--dsw-alias-bg-layer-3); color:var(--dsw-alias-label-primary); }
-    .k8s-pre { font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size:12px; line-height:1.5; padding:12px; white-space:pre-wrap; overflow-wrap:anywhere; }
-    .k8s-empty { display:flex; align-items:center; justify-content:center; height:100%; color:var(--dsw-alias-label-dimmed); flex-direction:column; gap:12px; }
-    .k8s-error { color:var(--dsw-alias-state-error-primary); }
-    .k8s-log-wrap { display:flex; flex-direction:column-reverse; height:100%; overflow:auto; padding:12px; }
-    .k8s-logs { font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size:12px; line-height:1.5; white-space:pre-wrap; color:var(--dsw-alias-label-primary); }
-    .k8s-log-controls { display:flex; gap:8px; align-items:center; padding:12px 16px; border-bottom:1px solid var(--dsw-alias-border-l1); }
-    .k8s-select-small { background:var(--dsw-alias-bg-layer-2); color:var(--dsw-alias-label-primary); border:1px solid var(--dsw-alias-border-l2); border-radius:4px; padding:3px 6px; font-size:12px; }
-    .k8s-status-ok { color:var(--dsw-alias-state-success-primary); }
-    .k8s-status-warn { color:var(--dsw-alias-state-warn-primary); }
-    .k8s-status-err { color:var(--dsw-alias-state-error-primary); }
-    .k8s-config-overlay { position:fixed; inset:0; z-index:1000; background:rgba(0,0,0,0.5); display:flex; align-items:center; justify-content:center; padding:20px; }
-    .k8s-config-area { width:100%; max-width:720px; max-height:80vh; display:flex; flex-direction:column; gap:12px; background:var(--dsw-alias-bg-layer-1); border:1px solid var(--dsw-alias-border-l1); border-radius:12px; padding:16px; box-shadow:0 10px 30px rgba(0,0,0,0.2); }
-    .k8s-textarea { width:100%; flex:1; min-height:300px; font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size:12px; line-height:1.5; padding:12px; border:1px solid var(--dsw-alias-border-l2); border-radius:8px; background:var(--dsw-alias-bg-layer-2); color:var(--dsw-alias-label-primary); resize:vertical; }
-    .k8s-config-actions { display:flex; justify-content:flex-end; gap:8px; }
-    .k8s-config-list { display:flex; flex-direction:column; gap:8px; max-height:160px; overflow:auto; border:1px solid var(--dsw-alias-border-l2); border-radius:8px; padding:8px; background:var(--dsw-alias-bg-layer-2); }
-    .k8s-config-item { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:6px 8px; border-radius:5px; font-size:13px; }
-    .k8s-config-item:hover { background:var(--dsw-alias-interactive-bg-hover); }
-  `;
-	const styleEl = document.createElement("style");
-	styleEl.textContent = css;
-	document.head.appendChild(styleEl);
 	function K8sView() {
 		react.useEffect(() => {
 			if (state.boot === "idle") boot();
 		}, []);
-		return react.createElement(Workbench, { ctx });
+		return react.createElement(Workbench);
 	}
+	function K8sPanel() {
+		return react.createElement("div", { className: "k8s-panel" }, react.createElement(K8sView));
+	}
+	function K8sPanelIcon({ size }) {
+		return react.createElement("svg", {
+			width: size,
+			height: size,
+			viewBox: "0 0 24 24",
+			fill: "none",
+			stroke: "currentColor",
+			strokeWidth: 1.6,
+			strokeLinecap: "round",
+			strokeLinejoin: "round",
+			"aria-hidden": true
+		}, react.createElement("path", { d: "M12 2 20.7 7v10L12 22l-8.7-5V7Z" }), react.createElement("circle", {
+			cx: 12,
+			cy: 12,
+			r: 3.5
+		}), react.createElement("path", { d: "M12 5v3.5M12 15.5V19M5.9 8.5l3 1.75M15.1 13.75l3 1.75M5.9 15.5l3-1.75M15.1 10.25l3-1.75" }));
+	}
+	slots.inject("main", () => slots.register({
+		name: "main",
+		key: PANEL_ID
+	}, K8sPanel));
+	slots.inject("sidebar.panellist", () => slots.register({
+		name: "sidebar.panellist",
+		id: PANEL_ID,
+		label: "Kubernetes",
+		order: 1
+	}, K8sPanelIcon));
 	slots.inject("conversation.view", () => slots.register({
 		name: "conversation.view",
-		id: "k8s-manager",
+		id: PANEL_ID,
 		label: "Kubernetes",
 		order: 10
 	}, () => react.createElement(K8sView)));
@@ -13881,8 +14316,16 @@ function apply(ctx) {
 exports.apply = apply;
 exports.inject = inject;
 
+    const applyClient = module.exports.apply;
+    module.exports.apply = (ctx, ...args) => {
+      ctx.effect(() => {
+        const style = document.createElement('style');
+        style.textContent = ".xterm {\n  cursor: text;\n  -webkit-user-select: none;\n  -ms-user-select: none;\n  user-select: none;\n  position: relative;\n}\n\n.xterm.focus, .xterm:focus {\n  outline: none;\n}\n\n.xterm .xterm-helpers {\n  z-index: 5;\n  position: absolute;\n  top: 0;\n}\n\n.xterm .xterm-helper-textarea {\n  opacity: 0;\n  z-index: -5;\n  white-space: nowrap;\n  resize: none;\n  border: 0;\n  width: 0;\n  height: 0;\n  margin: 0;\n  padding: 0;\n  position: absolute;\n  top: 0;\n  left: -9999em;\n  overflow: hidden;\n}\n\n.xterm .composition-view {\n  color: #fff;\n  white-space: nowrap;\n  z-index: 1;\n  background: #000;\n  display: none;\n  position: absolute;\n}\n\n.xterm .composition-view.active {\n  display: block;\n}\n\n.xterm .xterm-viewport {\n  cursor: default;\n  background-color: #000;\n  position: absolute;\n  inset: 0;\n  overflow-y: scroll;\n}\n\n.xterm .xterm-screen {\n  position: relative;\n}\n\n.xterm .xterm-screen canvas {\n  position: absolute;\n  top: 0;\n  left: 0;\n}\n\n.xterm-char-measure-element {\n  visibility: hidden;\n  line-height: normal;\n  display: inline-block;\n  position: absolute;\n  top: 0;\n  left: -9999em;\n}\n\n.xterm.enable-mouse-events {\n  cursor: default;\n}\n\n.xterm.xterm-cursor-pointer, .xterm .xterm-cursor-pointer {\n  cursor: pointer;\n}\n\n.xterm.column-select.focus {\n  cursor: crosshair;\n}\n\n.xterm .xterm-accessibility:not(.debug), .xterm .xterm-message {\n  z-index: 10;\n  color: #0000;\n  pointer-events: none;\n  position: absolute;\n  inset: 0;\n}\n\n.xterm .xterm-accessibility-tree:not(.debug) ::selection {\n  color: #0000;\n}\n\n.xterm .xterm-accessibility-tree {\n  user-select: text;\n  white-space: pre;\n  font-family: monospace;\n}\n\n.xterm .xterm-accessibility-tree > div {\n  transform-origin: 0;\n  width: fit-content;\n}\n\n.xterm .live-region {\n  width: 1px;\n  height: 1px;\n  position: absolute;\n  left: -9999px;\n  overflow: hidden;\n}\n\n.xterm-dim {\n  opacity: 1 !important;\n}\n\n.xterm-underline-1 {\n  text-decoration: underline;\n}\n\n.xterm-underline-2 {\n  text-decoration: underline double;\n}\n\n.xterm-underline-3 {\n  text-decoration: underline wavy;\n}\n\n.xterm-underline-4 {\n  text-decoration: underline dotted;\n}\n\n.xterm-underline-5 {\n  text-decoration: underline dashed;\n}\n\n.xterm-overline {\n  text-decoration: overline;\n}\n\n.xterm-overline.xterm-underline-1 {\n  text-decoration: underline overline;\n}\n\n.xterm-overline.xterm-underline-2 {\n  text-decoration: overline double underline;\n}\n\n.xterm-overline.xterm-underline-3 {\n  text-decoration: overline wavy underline;\n}\n\n.xterm-overline.xterm-underline-4 {\n  text-decoration: overline dotted underline;\n}\n\n.xterm-overline.xterm-underline-5 {\n  text-decoration: overline dashed underline;\n}\n\n.xterm-strikethrough {\n  text-decoration: line-through;\n}\n\n.xterm-screen .xterm-decoration-container .xterm-decoration {\n  z-index: 6;\n  position: absolute;\n}\n\n.xterm-screen .xterm-decoration-container .xterm-decoration.xterm-decoration-top-layer {\n  z-index: 7;\n}\n\n.xterm-decoration-overview-ruler {\n  z-index: 8;\n  pointer-events: none;\n  position: absolute;\n  top: 0;\n  right: 0;\n}\n\n.xterm-decoration-top {\n  z-index: 2;\n  position: relative;\n}\n\n.xterm .xterm-scrollable-element > .scrollbar {\n  cursor: default;\n}\n\n.xterm .xterm-scrollable-element > .scrollbar > .scra {\n  cursor: pointer;\n  font-size: 11px !important;\n}\n\n.xterm .xterm-scrollable-element > .visible {\n  opacity: 1;\n  z-index: 11;\n  background: none;\n  transition: opacity .1s linear;\n}\n\n.xterm .xterm-scrollable-element > .invisible {\n  opacity: 0;\n  pointer-events: none;\n}\n\n.xterm .xterm-scrollable-element > .invisible.fade {\n  transition: opacity .8s linear;\n}\n\n.xterm .xterm-scrollable-element > .shadow {\n  display: none;\n  position: absolute;\n}\n\n.xterm .xterm-scrollable-element > .shadow.top {\n  width: 100%;\n  height: 3px;\n  box-shadow: var(--vscode-scrollbar-shadow, #000) 0 6px 6px -6px inset;\n  display: block;\n  top: 0;\n  left: 3px;\n}\n\n.xterm .xterm-scrollable-element > .shadow.left {\n  width: 3px;\n  height: 100%;\n  box-shadow: var(--vscode-scrollbar-shadow, #000) 6px 0 6px -6px inset;\n  display: block;\n  top: 3px;\n  left: 0;\n}\n\n.xterm .xterm-scrollable-element > .shadow.top-left-corner {\n  width: 3px;\n  height: 3px;\n  display: block;\n  top: 0;\n  left: 0;\n}\n\n.xterm .xterm-scrollable-element > .shadow.top.left {\n  box-shadow: var(--vscode-scrollbar-shadow, #000) 6px 0 6px -6px inset;\n}\n.k8s-view {\n  --k8s-surface: color-mix(in srgb, var(--dsw-alias-bg-layer-1) 32%, transparent);\n  --k8s-surface-raised: color-mix(in srgb, var(--dsw-alias-bg-layer-2) 45%, transparent);\n  --k8s-stroke: var(--dsw-alias-border-l2);\n  --k8s-radius: var(--dsw-radius-sm, 8px);\n  width: 100%;\n  min-width: 0;\n  height: 100%;\n  min-height: 0;\n  max-height: calc(100vh - 100px);\n  color: var(--dsw-alias-label-primary);\n  font-family: var(--dsw-font-family, inherit);\n  font-size: var(--dsh-content-font-size-secondary, 13px);\n  background: none;\n  flex-direction: column;\n  line-height: 1.55;\n  display: flex;\n  overflow: hidden;\n  container: k8s / inline-size;\n}\n\n.k8s-view *, .k8s-view :before, .k8s-view :after {\n  box-sizing: border-box;\n}\n\n.k8s-view button, .k8s-view input, .k8s-view select, .k8s-view textarea {\n  font: inherit;\n}\n\n.k8s-view button, .k8s-view select {\n  touch-action: manipulation;\n}\n\n.k8s-view ::selection {\n  background: var(--dsw-alias-bg-document-selection);\n}\n\n.k8s-view :is(button, input, select, textarea):focus-visible {\n  outline: 2px solid var(--dsw-alias-brand-primary);\n  outline-offset: 3px;\n}\n\n.k8s-view :is(button, select):disabled {\n  cursor: default;\n  opacity: .5;\n}\n\n.k8s-panel {\n  flex: 1;\n  width: 100%;\n  min-width: 0;\n  height: 100%;\n  min-height: 0;\n  display: flex;\n  overflow: hidden;\n}\n\n.k8s-panel .k8s-view {\n  max-height: none;\n}\n\n.k8s-topbar {\n  border-bottom: 1px solid var(--k8s-stroke);\n  background: var(--k8s-surface);\n  flex: none;\n  align-items: center;\n  gap: 10px;\n  padding: 16px 20px;\n  display: flex;\n}\n\n.k8s-heading {\n  min-width: 0;\n  margin-right: auto;\n}\n\n.k8s-heading h2 {\n  color: var(--dsw-alias-label-primary);\n  overflow-wrap: anywhere;\n  margin: 0;\n  font-size: 22px;\n  font-weight: 600;\n  line-height: 1.4;\n}\n\n.k8s-title {\n  color: var(--dsw-alias-label-primary);\n  overflow-wrap: anywhere;\n  align-items: center;\n  gap: 8px;\n  margin: 0;\n  font-size: 18px;\n  font-weight: 600;\n  line-height: 1.4;\n  display: flex;\n}\n\n.k8s-subtitle {\n  color: var(--dsw-alias-label-secondary);\n  margin: 4px 0 0;\n  font-size: 12px;\n  line-height: 1.5;\n}\n\n.k8s-eyebrow {\n  color: var(--dsw-alias-label-tertiary);\n  letter-spacing: .04em;\n  margin-bottom: 4px;\n  font-size: 11px;\n}\n\n.k8s-icon {\n  flex-shrink: 0;\n  justify-content: center;\n  align-items: center;\n  width: 20px;\n  height: 20px;\n  font-size: 19px;\n  line-height: 1;\n  display: inline-flex;\n}\n\n.k8s-cluster-picker {\n  border: 1px solid var(--k8s-stroke);\n  border-radius: var(--k8s-radius);\n  background: var(--k8s-surface-raised);\n  align-items: center;\n  gap: 8px;\n  min-width: 0;\n  max-width: 300px;\n  padding-left: 12px;\n  display: flex;\n}\n\n.k8s-cluster-picker .k8s-select {\n  background: none;\n  border: 0;\n  flex: 1;\n  width: 100%;\n  min-width: 0;\n  max-width: 270px;\n}\n\n.k8s-cluster-picker > .k8s-subtitle {\n  white-space: nowrap;\n  flex-shrink: 0;\n  margin: 0;\n}\n\n.k8s-cluster-dot {\n  background: var(--dsw-alias-state-success-primary);\n  border-radius: 50%;\n  flex: 0 0 6px;\n  width: 6px;\n  height: 6px;\n}\n\n.k8s-select, .k8s-select-small {\n  border: 1px solid var(--k8s-stroke);\n  border-radius: var(--k8s-radius);\n  background: var(--k8s-surface-raised);\n  min-width: 0;\n  height: 34px;\n  color: var(--dsw-alias-label-primary);\n  cursor: pointer;\n  padding: 5px 28px 5px 10px;\n}\n\n.k8s-select {\n  max-width: 300px;\n}\n\n.k8s-select-small {\n  max-width: 230px;\n  font-size: 12px;\n}\n\n.k8s-view option {\n  background: var(--dsw-alias-bg-layer-2);\n  color: var(--dsw-alias-label-primary);\n}\n\n.k8s-btn {\n  border: 1px solid var(--k8s-stroke);\n  border-radius: var(--k8s-radius);\n  background: var(--k8s-surface-raised);\n  min-height: 34px;\n  color: var(--dsw-alias-label-primary);\n  cursor: pointer;\n  white-space: nowrap;\n  transition: background var(--ds-transition-duration-fast, .1s), border-color var(--ds-transition-duration-fast, .1s);\n  flex: none;\n  justify-content: center;\n  align-items: center;\n  gap: 6px;\n  padding: 6px 12px;\n  font-size: 12px;\n  font-weight: 500;\n  line-height: 1.5;\n  display: inline-flex;\n}\n\n.k8s-btn:hover:not(:disabled) {\n  border-color: var(--dsw-alias-border-l4);\n  background: var(--dsw-alias-interactive-bg-hover);\n}\n\n.k8s-btn:active:not(:disabled) {\n  background: var(--dsw-alias-interactive-bg-active);\n}\n\n.k8s-btn-primary {\n  border-color: var(--dsw-alias-button-primary-fill, var(--dsw-alias-brand-primary));\n  background: var(--dsw-alias-button-primary-fill, var(--dsw-alias-brand-primary));\n  color: var(--dsw-alias-label-primary-inverted);\n}\n\n.k8s-btn-primary:hover:not(:disabled) {\n  border-color: var(--dsw-alias-button-primary-hover, var(--dsw-alias-brand-primary));\n  background: var(--dsw-alias-button-primary-hover, var(--dsw-alias-brand-primary));\n}\n\n.k8s-btn-warn {\n  border-color: color-mix(in srgb, var(--dsw-alias-state-error-primary) 35%, transparent);\n  background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 7%, transparent);\n  color: var(--dsw-alias-state-error-primary);\n}\n\n.k8s-btn-warn:hover:not(:disabled) {\n  border-color: var(--dsw-alias-state-error-primary);\n  background: var(--dsw-alias-interactive-bg-hover-danger);\n}\n\n.k8s-icon-btn {\n  width: 32px;\n  min-width: 32px;\n  min-height: 32px;\n  padding: 5px;\n  font-size: 18px;\n  line-height: 1;\n}\n\n.k8s-body {\n  flex: 1;\n  min-width: 0;\n  min-height: 0;\n  display: flex;\n  position: relative;\n  overflow: hidden;\n}\n\n.k8s-sidebar {\n  border-right: 1px solid var(--k8s-stroke);\n  background: color-mix(in srgb, var(--dsw-specific-sidebar-fill, var(--dsw-alias-bg-layer-1)) 35%, transparent);\n  flex: 0 0 188px;\n  width: 188px;\n  padding: 10px 8px 20px;\n  overflow: auto;\n}\n\n.k8s-tree-group {\n  color: var(--dsw-alias-label-tertiary);\n  letter-spacing: .02em;\n  margin: 18px 10px 6px;\n  font-size: 11px;\n  font-weight: 500;\n}\n\n.k8s-sidebar > :first-child .k8s-tree-group {\n  margin-top: 6px;\n}\n\n.k8s-tree-item {\n  border-radius: var(--k8s-radius);\n  width: 100%;\n  min-height: 34px;\n  color: var(--dsw-alias-label-secondary);\n  cursor: pointer;\n  text-align: left;\n  background: none;\n  border: 1px solid #0000;\n  align-items: center;\n  gap: 8px;\n  margin: 2px 0;\n  padding: 6px 10px;\n  font-size: 12px;\n  line-height: 1.6;\n  display: flex;\n}\n\n.k8s-tree-item:hover {\n  background: color-mix(in srgb, var(--dsw-specific-sidebar-nav-item-hover, var(--dsw-alias-interactive-bg-hover)) 65%, transparent);\n  color: var(--dsw-alias-label-primary);\n}\n\n.k8s-tree-item.active {\n  background: color-mix(in srgb, var(--dsw-specific-sidebar-nav-item-active, var(--dsw-alias-interactive-bg-active)) 70%, transparent);\n  color: var(--dsw-alias-brand-text, var(--dsw-alias-label-primary));\n  font-weight: 600;\n}\n\n.k8s-nav-label {\n  text-overflow: ellipsis;\n  white-space: nowrap;\n  flex: 1;\n  min-width: 0;\n  overflow: hidden;\n}\n\n.k8s-nav-count {\n  color: var(--dsw-alias-label-tertiary);\n  font-variant-numeric: tabular-nums;\n  flex: none;\n  font-size: 11px;\n}\n\n.k8s-main {\n  background: none;\n  flex-direction: column;\n  flex: 1;\n  min-width: 0;\n  min-height: 0;\n  display: flex;\n  overflow: hidden;\n}\n\n.k8s-content {\n  flex-direction: column;\n  flex: 1;\n  gap: 18px;\n  min-width: 0;\n  min-height: 0;\n  padding: 24px;\n  display: flex;\n  overflow: auto;\n}\n\n.k8s-page-head {\n  flex: none;\n  justify-content: space-between;\n  align-items: center;\n  gap: 12px;\n  display: flex;\n}\n\n.k8s-page-head .k8s-title {\n  font-size: 22px;\n}\n\n.k8s-count {\n  border: 1px solid var(--dsw-alias-border-l1);\n  background: var(--k8s-surface-raised);\n  color: var(--dsw-alias-label-secondary);\n  white-space: nowrap;\n  font-variant-numeric: tabular-nums;\n  border-radius: 100px;\n  flex: none;\n  padding: 3px 9px;\n  font-size: 11px;\n}\n\n.k8s-toolbar {\n  flex-wrap: wrap;\n  flex: none;\n  align-items: center;\n  gap: 10px;\n  display: flex;\n}\n\n.k8s-search {\n  border: 1px solid var(--k8s-stroke);\n  border-radius: var(--k8s-radius);\n  background: var(--k8s-surface-raised);\n  min-width: 160px;\n  max-width: 420px;\n  color: var(--dsw-alias-label-tertiary);\n  flex: 1;\n  align-items: center;\n  gap: 8px;\n  padding-left: 10px;\n  display: flex;\n}\n\n.k8s-search:focus-within {\n  border-color: var(--dsw-alias-brand-primary);\n}\n\n.k8s-search .k8s-filter {\n  background: none;\n  border: 0;\n  max-width: none;\n  padding-left: 0;\n}\n\n.k8s-search .k8s-filter:focus-visible {\n  outline: 0;\n}\n\n.k8s-filter {\n  border: 1px solid var(--k8s-stroke);\n  border-radius: var(--k8s-radius);\n  background: var(--k8s-surface-raised);\n  width: 100%;\n  min-width: 0;\n  max-width: 420px;\n  min-height: 34px;\n  color: var(--dsw-alias-label-primary);\n  padding: 6px 10px;\n  display: block;\n}\n\n.k8s-filter::placeholder, .k8s-textarea::placeholder {\n  color: var(--dsw-alias-label-tertiary);\n  opacity: 1;\n}\n\n.k8s-summary {\n  border: 1px solid var(--dsw-alias-border-l1);\n  border-radius: var(--k8s-radius);\n  background: var(--k8s-surface);\n  color: var(--dsw-alias-label-secondary);\n  flex-wrap: wrap;\n  align-items: center;\n  gap: 10px 16px;\n  padding: 12px 16px;\n  font-size: 12px;\n  display: flex;\n}\n\n.k8s-stat-grid {\n  flex: none;\n  grid-template-columns: repeat(3, minmax(0, 1fr));\n  gap: 12px;\n  display: grid;\n}\n\n.k8s-stat-card {\n  border: 1px solid var(--k8s-stroke);\n  border-radius: var(--dsw-radius-md, 12px);\n  background: var(--k8s-surface-raised);\n  min-width: 0;\n  min-height: 124px;\n  color: var(--dsw-alias-label-primary);\n  cursor: pointer;\n  text-align: left;\n  transition: background var(--ds-transition-duration-fast, .1s), border-color var(--ds-transition-duration-fast, .1s);\n  flex-direction: column;\n  align-items: flex-start;\n  gap: 6px;\n  padding: 18px;\n  display: flex;\n  position: relative;\n}\n\n.k8s-stat-card:hover:not(:disabled) {\n  border-color: var(--dsw-alias-border-l4);\n  background: var(--dsw-alias-interactive-bg-hover);\n}\n\n.k8s-stat-icon {\n  color: var(--dsw-alias-label-tertiary);\n  font-size: 16px;\n  position: absolute;\n  top: 18px;\n  right: 16px;\n}\n\n.k8s-stat-value {\n  color: var(--dsw-alias-label-primary);\n  font-variant-numeric: tabular-nums;\n  margin-top: 4px;\n  font-size: 30px;\n  font-weight: 600;\n  line-height: 1.2;\n}\n\n.k8s-stat-label {\n  color: var(--dsw-alias-label-secondary);\n  font-size: 12px;\n  line-height: 1.5;\n}\n\n.k8s-status-ok {\n  color: color-mix(in srgb, var(--dsw-alias-state-success-primary) 80%, var(--dsw-alias-label-primary));\n}\n\n.k8s-status-warn {\n  color: var(--dsw-alias-state-warn-label, var(--dsw-alias-state-warn-primary));\n}\n\n.k8s-status-err, .k8s-status-error, .k8s-error {\n  color: var(--dsw-alias-state-error-primary);\n}\n\n.k8s-table-wrap {\n  border: 1px solid var(--k8s-stroke);\n  border-radius: var(--dsw-radius-md, 12px);\n  background: var(--k8s-surface);\n  flex-direction: column;\n  flex: 1;\n  min-width: 0;\n  min-height: 180px;\n  display: flex;\n  overflow: hidden;\n}\n\n.k8s-table-scroll {\n  flex: 1;\n  min-width: 0;\n  min-height: 0;\n  overflow: auto;\n}\n\n.k8s-table {\n  border-collapse: separate;\n  border-spacing: 0;\n  width: 100%;\n  color: var(--dsw-alias-label-primary);\n  text-align: left;\n  margin: 0;\n  font-size: 12px;\n  line-height: 1.6;\n}\n\n.k8s-table th, .k8s-table td {\n  white-space: nowrap;\n  vertical-align: middle;\n  padding: 11px 16px;\n}\n\n.k8s-table th {\n  z-index: 1;\n  border-bottom: 1px solid var(--k8s-stroke);\n  background: color-mix(in srgb, var(--dsw-alias-bg-layer-2) 92%, transparent);\n  color: var(--dsw-alias-label-secondary);\n  letter-spacing: .02em;\n  backdrop-filter: blur(10px);\n  font-size: 11px;\n  font-weight: 500;\n  position: sticky;\n  top: 0;\n}\n\n.k8s-table td {\n  border-bottom: 1px solid var(--dsw-alias-border-l1);\n  font-variant-numeric: tabular-nums;\n}\n\n.k8s-table tbody tr:last-child td {\n  border-bottom: 0;\n}\n\n.k8s-row:hover, .k8s-table tbody tr:hover {\n  background: var(--dsw-alias-interactive-bg-hover);\n}\n\n.k8s-row.active, .k8s-table tbody tr.active {\n  background: var(--dsw-alias-interactive-bg-active);\n}\n\n.k8s-resource-name {\n  max-width: 360px;\n  color: var(--dsw-alias-label-primary);\n  cursor: pointer;\n  text-align: left;\n  overflow-wrap: anywhere;\n  background: none;\n  border: 0;\n  border-radius: 2px;\n  padding: 0;\n  font-weight: 500;\n  display: inline-flex;\n}\n\n.k8s-resource-name:hover {\n  color: var(--dsw-alias-link, var(--dsw-alias-brand-text));\n  text-underline-offset: 3px;\n  text-decoration: underline;\n}\n\n.k8s-table-footer {\n  border-top: 1px solid var(--dsw-alias-border-l1);\n  color: var(--dsw-alias-label-tertiary);\n  flex: none;\n  justify-content: space-between;\n  align-items: center;\n  gap: 12px;\n  padding: 10px 16px;\n  font-size: 11px;\n  display: flex;\n}\n\n.k8s-badge {\n  border: 1px solid var(--dsw-alias-border-l1);\n  background: var(--k8s-surface-raised);\n  min-height: 22px;\n  color: var(--dsw-alias-label-secondary);\n  white-space: nowrap;\n  border-radius: 6px;\n  align-items: center;\n  gap: 5px;\n  padding: 2px 7px;\n  font-size: 11px;\n  line-height: 1.5;\n  display: inline-flex;\n}\n\n.k8s-badge.ok {\n  border-color: color-mix(in srgb, var(--dsw-alias-state-success-primary) 18%, transparent);\n  background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 8%, transparent);\n  color: color-mix(in srgb, var(--dsw-alias-state-success-primary) 80%, var(--dsw-alias-label-primary));\n}\n\n.k8s-badge.warn {\n  border-color: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 18%, transparent);\n  background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 8%, transparent);\n  color: var(--dsw-alias-state-warn-label, var(--dsw-alias-state-warn-primary));\n}\n\n.k8s-badge.error {\n  border-color: color-mix(in srgb, var(--dsw-alias-state-error-primary) 18%, transparent);\n  background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 8%, transparent);\n  color: var(--dsw-alias-state-error-primary);\n}\n\n.k8s-badge.neutral {\n  color: var(--dsw-alias-label-secondary);\n}\n\n.k8s-detail {\n  border-left: 1px solid var(--k8s-stroke);\n  background: var(--k8s-surface-raised);\n  flex-direction: column;\n  flex: 0 0 42%;\n  width: 42%;\n  min-width: 320px;\n  max-width: 560px;\n  height: 100%;\n  min-height: 0;\n  display: flex;\n  overflow: hidden;\n}\n\n.k8s-detail-head {\n  border-bottom: 1px solid var(--k8s-stroke);\n  flex: none;\n  justify-content: space-between;\n  align-items: flex-start;\n  gap: 12px;\n  padding: 18px 20px 0;\n  display: flex;\n}\n\n.k8s-detail-head > :first-child {\n  flex: 1;\n  min-width: 0;\n}\n\n.k8s-detail-head .k8s-title {\n  font-size: 15px;\n}\n\n.k8s-detail-meta {\n  color: var(--dsw-alias-label-secondary);\n  overflow-wrap: anywhere;\n  flex-wrap: wrap;\n  gap: 6px;\n  margin-top: 6px;\n  font-size: 11px;\n  display: flex;\n}\n\n.k8s-actions {\n  flex-wrap: wrap;\n  flex: none;\n  align-items: center;\n  gap: 6px;\n  display: flex;\n}\n\n.k8s-actions .k8s-btn {\n  min-height: 30px;\n  padding: 4px 8px;\n}\n\n.k8s-tabs {\n  gap: 18px;\n  margin-top: 16px;\n  display: flex;\n}\n\n.k8s-tab {\n  min-height: 32px;\n  color: var(--dsw-alias-label-secondary);\n  cursor: pointer;\n  background: none;\n  border: 0;\n  padding: 3px 0 10px;\n  font-size: 12px;\n  position: relative;\n}\n\n.k8s-tab:hover {\n  color: var(--dsw-alias-label-primary);\n}\n\n.k8s-tab.active {\n  color: var(--dsw-alias-brand-text, var(--dsw-alias-label-primary));\n  font-weight: 600;\n}\n\n.k8s-tab.active:after {\n  background: var(--dsw-alias-brand-primary);\n  content: \"\";\n  border-radius: 2px;\n  height: 2px;\n  position: absolute;\n  bottom: -1px;\n  left: 0;\n  right: 0;\n}\n\n.k8s-detail-body, .k8s-detail-panel {\n  flex-direction: column;\n  flex: 1;\n  min-width: 0;\n  min-height: 0;\n  display: flex;\n  overflow: hidden;\n}\n\n.k8s-detail-scroll {\n  flex: 1;\n  min-width: 0;\n  min-height: 0;\n  overflow: auto;\n}\n\n.k8s-log-controls {\n  border-bottom: 1px solid var(--dsw-alias-border-l1);\n  flex-wrap: wrap;\n  flex: none;\n  align-items: center;\n  gap: 8px;\n  padding: 12px 16px;\n  display: flex;\n}\n\n.k8s-pre, .k8s-logs, .k8s-code {\n  color: var(--dsw-alias-label-primary);\n  font-family: var(--ds-font-family-code, ui-monospace, monospace);\n  tab-size: 2;\n  white-space: pre-wrap;\n  overflow-wrap: anywhere;\n  background: none;\n  margin: 0;\n  padding: 16px;\n  font-size: 12px;\n  line-height: 1.65;\n}\n\n.k8s-code {\n  background: color-mix(in srgb, var(--dsw-alias-markdown-code-block, var(--dsw-alias-bg-layer-2)) 45%, transparent);\n}\n\n.k8s-terminal {\n  background: none;\n  padding: 12px;\n}\n\n.k8s-terminal .xterm {\n  padding: 0;\n}\n\n.k8s-terminal-placeholder {\n  min-height: 160px;\n  color: var(--dsw-alias-label-secondary);\n  text-align: center;\n  flex-direction: column;\n  flex: 1;\n  justify-content: center;\n  align-items: center;\n  gap: 8px;\n  padding: 24px;\n  font-size: 12px;\n  display: flex;\n}\n\n.k8s-textarea {\n  border: 1px solid var(--k8s-stroke);\n  border-radius: var(--k8s-radius);\n  background: var(--k8s-surface-raised);\n  width: 100%;\n  min-height: 280px;\n  color: var(--dsw-alias-label-primary);\n  tab-size: 2;\n  resize: vertical;\n  padding: 14px;\n  display: block;\n  font-family: var(--ds-font-family-code, ui-monospace, monospace) !important;\n  font-size: 12px !important;\n  line-height: 1.65 !important;\n}\n\n.k8s-detail-scroll > .k8s-textarea {\n  resize: none;\n  border: 0;\n  border-radius: 0;\n  min-height: 100%;\n}\n\n.k8s-empty {\n  height: 100%;\n  min-height: 180px;\n  color: var(--dsw-alias-label-secondary);\n  text-align: center;\n  overflow-wrap: anywhere;\n  flex-direction: column;\n  flex: 1;\n  justify-content: center;\n  align-items: center;\n  gap: 10px;\n  padding: 32px 24px;\n  display: flex;\n}\n\n.k8s-empty-title {\n  color: var(--dsw-alias-label-primary);\n  font-size: 15px;\n  font-weight: 500;\n}\n\n.k8s-empty-hint {\n  max-width: 420px;\n  color: var(--dsw-alias-label-secondary);\n  font-size: 12px;\n  line-height: 1.7;\n}\n\n.k8s-empty.k8s-error .k8s-empty-title {\n  color: var(--dsw-alias-state-error-primary);\n}\n\n.k8s-config-overlay {\n  z-index: 1000;\n  width: 100%;\n  max-width: none;\n  height: 100%;\n  max-height: none;\n  color: var(--dsw-alias-label-primary);\n  background: none;\n  border: 0;\n  justify-content: center;\n  align-items: center;\n  margin: 0;\n  padding: 24px;\n  display: flex;\n  position: fixed;\n  inset: 0;\n}\n\n.k8s-config-overlay:not([open]) {\n  display: none;\n}\n\n.k8s-config-overlay::backdrop {\n  background: var(--dsw-alias-bg-mask-3, var(--dsw-alias-bg-mask-1));\n  backdrop-filter: var(--dsw-mask-blur, none);\n}\n\n.k8s-config-area {\n  border: 1px solid var(--dsw-alias-border-l4);\n  border-radius: var(--dsw-radius-lg, 16px);\n  background: color-mix(in srgb, var(--dsw-alias-bg-layer-1) 95%, transparent);\n  width: 100%;\n  max-width: 640px;\n  max-height: min(85vh, 850px);\n  box-shadow: var(--dsw-elevation-prominent, var(--dsw-elevation-panel));\n  flex-direction: column;\n  gap: 14px;\n  padding: 24px;\n  display: flex;\n  overflow: auto;\n}\n\n.k8s-config-title {\n  justify-content: space-between;\n  align-items: center;\n  gap: 12px;\n  display: flex;\n}\n\n.k8s-config-heading {\n  justify-content: space-between;\n  align-items: flex-start;\n  gap: 12px;\n  display: flex;\n}\n\n.k8s-config-heading > :first-child {\n  flex: 1;\n  min-width: 0;\n}\n\n.k8s-config-heading h2, .k8s-config-title .k8s-title {\n  font-size: 18px;\n}\n\n.k8s-field {\n  color: var(--dsw-alias-label-secondary);\n  flex-direction: column;\n  gap: 6px;\n  font-size: 12px;\n  font-weight: 500;\n  display: flex;\n}\n\n.k8s-config-help {\n  color: var(--dsw-alias-label-secondary);\n  margin: 0;\n  font-size: 12px;\n  line-height: 1.65;\n}\n\n.k8s-config-area .k8s-filter {\n  max-width: none;\n}\n\n.k8s-config-area .k8s-textarea {\n  flex: none;\n  min-height: 220px;\n  max-height: 38vh;\n}\n\n.k8s-config-actions {\n  flex: none;\n  justify-content: flex-end;\n  gap: 8px;\n  padding-top: 4px;\n  display: flex;\n}\n\n.k8s-config-list {\n  border: 1px solid var(--k8s-stroke);\n  border-radius: var(--k8s-radius);\n  background: var(--k8s-surface);\n  flex-direction: column;\n  gap: 4px;\n  max-height: 160px;\n  padding: 8px;\n  display: flex;\n  overflow: auto;\n}\n\n.k8s-config-item {\n  border-radius: 6px;\n  justify-content: space-between;\n  align-items: center;\n  gap: 12px;\n  padding: 6px 8px;\n  font-size: 12px;\n  display: flex;\n}\n\n.k8s-config-item > span {\n  overflow-wrap: anywhere;\n  min-width: 0;\n}\n\n.k8s-config-item:hover {\n  background: var(--dsw-alias-interactive-bg-hover);\n}\n\n@container k8s (width <= 1000px) {\n  .k8s-content {\n    padding: 20px;\n  }\n\n  .k8s-topbar {\n    flex-wrap: wrap;\n    padding: 14px 16px;\n  }\n\n  .k8s-heading {\n    flex: 1;\n    min-width: 160px;\n  }\n\n  .k8s-topbar .k8s-subtitle {\n    display: none;\n  }\n\n  .k8s-cluster-picker {\n    max-width: 250px;\n  }\n\n  .k8s-detail {\n    z-index: 5;\n    background: color-mix(in srgb, var(--dsw-alias-bg-layer-1) 95%, transparent);\n    width: min(100%, 520px);\n    min-width: 0;\n    max-width: none;\n    box-shadow: var(--dsw-elevation-prominent, var(--dsw-elevation-panel));\n    backdrop-filter: blur(16px);\n    position: absolute;\n    top: 0;\n    bottom: 0;\n    right: 0;\n  }\n}\n\n@container k8s (width <= 800px) {\n  .k8s-stat-grid {\n    grid-template-columns: repeat(2, minmax(0, 1fr));\n  }\n}\n\n@container k8s (width <= 650px) {\n  .k8s-body {\n    flex-direction: column;\n  }\n\n  .k8s-sidebar {\n    border-right: 0;\n    border-bottom: 1px solid var(--k8s-stroke);\n    flex: none;\n    gap: 8px;\n    width: 100%;\n    max-height: 64px;\n    padding: 8px 12px;\n    display: flex;\n    overflow: auto hidden;\n  }\n\n  .k8s-sidebar > div {\n    flex: none;\n    align-items: center;\n    gap: 4px;\n    display: flex;\n  }\n\n  .k8s-tree-group {\n    display: none;\n  }\n\n  .k8s-tree-item {\n    white-space: nowrap;\n    flex: none;\n    width: auto;\n    margin: 0;\n    padding: 6px 10px;\n  }\n\n  .k8s-content {\n    gap: 14px;\n    padding: 18px 16px;\n  }\n\n  .k8s-page-head .k8s-title, .k8s-page-head .k8s-heading h2 {\n    font-size: 20px;\n  }\n\n  .k8s-topbar {\n    gap: 8px;\n  }\n\n  .k8s-heading {\n    flex: 1 0 calc(100% - 190px);\n  }\n\n  .k8s-title {\n    font-size: 16px;\n  }\n\n  .k8s-cluster-picker {\n    flex: 1;\n    max-width: none;\n  }\n\n  .k8s-topbar > .k8s-btn {\n    padding-left: 10px;\n    padding-right: 10px;\n  }\n\n  .k8s-toolbar .k8s-search {\n    max-width: none;\n  }\n\n  .k8s-stat-grid {\n    grid-template-columns: repeat(2, minmax(0, 1fr));\n    gap: 10px;\n  }\n\n  .k8s-stat-card {\n    min-height: 112px;\n    padding: 16px;\n  }\n\n  .k8s-stat-value {\n    font-size: 28px;\n  }\n\n  .k8s-detail {\n    width: 100%;\n  }\n\n  .k8s-detail-head {\n    padding-left: 16px;\n    padding-right: 16px;\n  }\n\n  .k8s-table th, .k8s-table td {\n    padding-left: 12px;\n    padding-right: 12px;\n  }\n\n  .k8s-table-footer {\n    flex-wrap: wrap;\n    gap: 4px;\n  }\n\n  .k8s-config-overlay {\n    padding: 12px;\n  }\n\n  .k8s-config-area {\n    gap: 12px;\n    padding: 18px;\n  }\n}\n\n@container k8s (width <= 380px) {\n  .k8s-heading, .k8s-cluster-picker {\n    flex-basis: 100%;\n  }\n\n  .k8s-toolbar > .k8s-select-small {\n    width: 100%;\n    max-width: none;\n  }\n\n  .k8s-summary {\n    gap: 8px;\n  }\n\n  .k8s-detail-head {\n    flex-wrap: wrap;\n  }\n\n  .k8s-detail-head .k8s-actions {\n    margin-bottom: 10px;\n  }\n}\n\n@media (prefers-reduced-motion: reduce) {\n  .k8s-view * {\n    scroll-behavior: auto !important;\n    transition: none !important;\n  }\n}\n";
+        document.head.appendChild(style);
+        return () => style.remove();
+      }, 'k8s-manager.styles');
+      return applyClient(ctx, ...args);
+    };
     return module.exports;
   }
 });
-
-(function(){var style=document.createElement('style');style.textContent=".xterm {\n  cursor: text;\n  -webkit-user-select: none;\n  -ms-user-select: none;\n  user-select: none;\n  position: relative;\n}\n\n.xterm.focus, .xterm:focus {\n  outline: none;\n}\n\n.xterm .xterm-helpers {\n  z-index: 5;\n  position: absolute;\n  top: 0;\n}\n\n.xterm .xterm-helper-textarea {\n  opacity: 0;\n  z-index: -5;\n  white-space: nowrap;\n  resize: none;\n  border: 0;\n  width: 0;\n  height: 0;\n  margin: 0;\n  padding: 0;\n  position: absolute;\n  top: 0;\n  left: -9999em;\n  overflow: hidden;\n}\n\n.xterm .composition-view {\n  color: #fff;\n  white-space: nowrap;\n  z-index: 1;\n  background: #000;\n  display: none;\n  position: absolute;\n}\n\n.xterm .composition-view.active {\n  display: block;\n}\n\n.xterm .xterm-viewport {\n  cursor: default;\n  background-color: #000;\n  position: absolute;\n  inset: 0;\n  overflow-y: scroll;\n}\n\n.xterm .xterm-screen {\n  position: relative;\n}\n\n.xterm .xterm-screen canvas {\n  position: absolute;\n  top: 0;\n  left: 0;\n}\n\n.xterm-char-measure-element {\n  visibility: hidden;\n  line-height: normal;\n  display: inline-block;\n  position: absolute;\n  top: 0;\n  left: -9999em;\n}\n\n.xterm.enable-mouse-events {\n  cursor: default;\n}\n\n.xterm.xterm-cursor-pointer, .xterm .xterm-cursor-pointer {\n  cursor: pointer;\n}\n\n.xterm.column-select.focus {\n  cursor: crosshair;\n}\n\n.xterm .xterm-accessibility:not(.debug), .xterm .xterm-message {\n  z-index: 10;\n  color: #0000;\n  pointer-events: none;\n  position: absolute;\n  inset: 0;\n}\n\n.xterm .xterm-accessibility-tree:not(.debug) ::selection {\n  color: #0000;\n}\n\n.xterm .xterm-accessibility-tree {\n  user-select: text;\n  white-space: pre;\n  font-family: monospace;\n}\n\n.xterm .xterm-accessibility-tree > div {\n  transform-origin: 0;\n  width: fit-content;\n}\n\n.xterm .live-region {\n  width: 1px;\n  height: 1px;\n  position: absolute;\n  left: -9999px;\n  overflow: hidden;\n}\n\n.xterm-dim {\n  opacity: 1 !important;\n}\n\n.xterm-underline-1 {\n  text-decoration: underline;\n}\n\n.xterm-underline-2 {\n  text-decoration: underline double;\n}\n\n.xterm-underline-3 {\n  text-decoration: underline wavy;\n}\n\n.xterm-underline-4 {\n  text-decoration: underline dotted;\n}\n\n.xterm-underline-5 {\n  text-decoration: underline dashed;\n}\n\n.xterm-overline {\n  text-decoration: overline;\n}\n\n.xterm-overline.xterm-underline-1 {\n  text-decoration: underline overline;\n}\n\n.xterm-overline.xterm-underline-2 {\n  text-decoration: overline double underline;\n}\n\n.xterm-overline.xterm-underline-3 {\n  text-decoration: overline wavy underline;\n}\n\n.xterm-overline.xterm-underline-4 {\n  text-decoration: overline dotted underline;\n}\n\n.xterm-overline.xterm-underline-5 {\n  text-decoration: overline dashed underline;\n}\n\n.xterm-strikethrough {\n  text-decoration: line-through;\n}\n\n.xterm-screen .xterm-decoration-container .xterm-decoration {\n  z-index: 6;\n  position: absolute;\n}\n\n.xterm-screen .xterm-decoration-container .xterm-decoration.xterm-decoration-top-layer {\n  z-index: 7;\n}\n\n.xterm-decoration-overview-ruler {\n  z-index: 8;\n  pointer-events: none;\n  position: absolute;\n  top: 0;\n  right: 0;\n}\n\n.xterm-decoration-top {\n  z-index: 2;\n  position: relative;\n}\n\n.xterm .xterm-scrollable-element > .scrollbar {\n  cursor: default;\n}\n\n.xterm .xterm-scrollable-element > .scrollbar > .scra {\n  cursor: pointer;\n  font-size: 11px !important;\n}\n\n.xterm .xterm-scrollable-element > .visible {\n  opacity: 1;\n  z-index: 11;\n  background: none;\n  transition: opacity .1s linear;\n}\n\n.xterm .xterm-scrollable-element > .invisible {\n  opacity: 0;\n  pointer-events: none;\n}\n\n.xterm .xterm-scrollable-element > .invisible.fade {\n  transition: opacity .8s linear;\n}\n\n.xterm .xterm-scrollable-element > .shadow {\n  display: none;\n  position: absolute;\n}\n\n.xterm .xterm-scrollable-element > .shadow.top {\n  width: 100%;\n  height: 3px;\n  box-shadow: var(--vscode-scrollbar-shadow, #000) 0 6px 6px -6px inset;\n  display: block;\n  top: 0;\n  left: 3px;\n}\n\n.xterm .xterm-scrollable-element > .shadow.left {\n  width: 3px;\n  height: 100%;\n  box-shadow: var(--vscode-scrollbar-shadow, #000) 6px 0 6px -6px inset;\n  display: block;\n  top: 3px;\n  left: 0;\n}\n\n.xterm .xterm-scrollable-element > .shadow.top-left-corner {\n  width: 3px;\n  height: 3px;\n  display: block;\n  top: 0;\n  left: 0;\n}\n\n.xterm .xterm-scrollable-element > .shadow.top.left {\n  box-shadow: var(--vscode-scrollbar-shadow, #000) 6px 0 6px -6px inset;\n}\n";document.head.appendChild(style);})();

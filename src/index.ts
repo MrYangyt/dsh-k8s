@@ -1,39 +1,27 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
-import { spawn } from 'node:child_process'
 import { WebSocket, WebSocketServer } from 'ws'
-import { createRequire } from 'node:module'
-
-const require = createRequire(import.meta.url)
-let nodePty: any = null
-try {
-  nodePty = require('node-pty')
-} catch (e) {
-  console.warn('[k8s-manager] node-pty not available, falling back to spawn')
-}
+import type { Context } from '@deepseek-ai/cordis'
+import type { ShellExecutor, ShellProcess, ShellRunResult } from '@deepseek-ai/dsh-shell'
+import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
+import type {} from '@deepseek-ai/dsh-subprocess'
+import { connectTerminal } from './terminal.js'
 
 export const name = 'dsh-k8s-manager'
 
-export const inject = ['shell', 'webServer']
+export const inject = ['shell', 'webServer', 'subprocess']
 
-interface ShellRunResult {
-  exitCode: number | null
-  stdout: { text: string }
-  stderr: { text: string }
+// DSH 0.2 exposes one asynchronous execution handle for foreground and logs.
+function shellService(executor: ShellExecutor) {
+  return {
+    resolve: executor.resolve.bind(executor),
+    run: async (spec: ReturnType<ShellExecutor['resolve']>) => (await executor.execute(spec)).result(),
+    start: (spec: ReturnType<ShellExecutor['resolve']>) => executor.execute(spec),
+  }
 }
 
-interface ShellProcess {
-  status: 'running' | 'completed' | 'killed'
-  readOutput(): { delta: string; lossy: boolean }
-  kill(): void
-}
-
-interface ShellService {
-  resolve(request: any): any
-  run(spec: any): Promise<ShellRunResult>
-  start(spec: any): ShellProcess
-}
+type ShellService = ReturnType<typeof shellService>
 
 const KINDS: Record<string, { ns: boolean }> = {
   pods: { ns: true }, deployments: { ns: true }, statefulsets: { ns: true },
@@ -190,6 +178,8 @@ class K8sService {
       name: (it.metadata && it.metadata.name) || '',
       namespace: (it.metadata && it.metadata.namespace) || '',
       created: (it.metadata && it.metadata.creationTimestamp) || '',
+      phase: it.status?.phase,
+      ready: kind === 'nodes' ? (it.status?.conditions || []).some((condition: any) => condition.type === 'Ready' && condition.status === 'True') : undefined,
     }))
     return { ok: true, table: tableR.stdout.text, items }
   }
@@ -236,8 +226,9 @@ class K8sService {
     const spec = this.shellSvc.resolve({
       command: `KUBECONFIG=${shq(this.kubeconfigPath(clusterName))} ${cmd}`,
       stdoutMaxBytes: 2 * 1024 * 1024,
+      onExpiry: 'none',
     })
-    const proc = this.shellSvc.start(spec)
+    const proc = await this.shellSvc.start(spec)
     return { ok: true, proc }
   }
 
@@ -303,11 +294,12 @@ class K8sService {
   }
 }
 
-export function apply(ctx: any) {
-  const shell = ctx.get('shell') as ShellService
+export function apply(ctx: Context) {
+  const shell = shellService(ctx.shell)
   const webServer = ctx.get('webServer')
-  if (!shell || !webServer) {
-    console.error('[k8s-manager] shell or webServer unavailable')
+  const subprocess = ctx.get('subprocess')
+  if (!shell || !webServer || !subprocess) {
+    console.error('[k8s-manager] shell, webServer or subprocess unavailable')
     return
   }
 
@@ -349,6 +341,7 @@ export function apply(ctx: any) {
   const k8s = new K8sService(shell, configsDir)
 
   const logSessions = new Map<string, { proc: ShellProcess }>()
+  const terminalSessions = new Map<AbortController, Promise<void>>()
   let logSeq = 0
 
   const sendJson = (res: any, status: number, body: any) => {
@@ -370,7 +363,7 @@ export function apply(ctx: any) {
     }
   }
 
-  const routes = [
+  const routes: WebRoute[] = [
     {
       kind: 'exact',
       path: '/dsh-k8s-manager/detect',
@@ -559,10 +552,10 @@ export function apply(ctx: any) {
     },
   ]
 
-  const disposers = routes.map((r) => webServer.register(r))
+  for (const route of routes) ctx.effect(() => webServer.register(route), `k8s-manager.route:${route.path}`)
 
   const wss = new WebSocketServer({ noServer: true })
-  disposers.push(ctx.effect(() => ctx.webServer.registerUpgrade({
+  ctx.effect(() => webServer.registerUpgrade({
     path: '/dsh-k8s-manager/ws/shell',
     handler: (req: any, socket: any, head: any) => {
       wss.handleUpgrade(req, socket, head, (ws: WebSocket) => {
@@ -571,80 +564,32 @@ export function apply(ctx: any) {
         const namespace = String(url.searchParams.get('namespace') || '')
         const pod = String(url.searchParams.get('pod') || '')
         const container = String(url.searchParams.get('container') || '')
-        if (!isName(clusterName) || !isName(namespace) || !isName(pod)) {
+        if (!isName(clusterName) || !isName(namespace) || !isName(pod) || (container && !isName(container))) {
           ws.close(1008, 'invalid params')
           return
         }
         const kubeconfig = path.join(configsDir, `${clusterName}.yaml`)
-        ws.send(`[k8s-manager] connected, starting shell in ${namespace}/${pod}\r\n`)
-        console.log(`[k8s-manager] shell ws started for ${namespace}/${pod}/${container}`)
-
-        let ptyProc: any = null
-        if (nodePty) {
-          try {
-            const args = ['exec', '-it', pod, '-n', namespace]
-            if (container) args.push('-c', container)
-            args.push('--', '/bin/sh')
-            ptyProc = nodePty.spawn('kubectl', args, {
-              name: 'xterm-256color',
-              cols: 80,
-              rows: 24,
-              cwd: process.cwd(),
-              env: { ...process.env, KUBECONFIG: kubeconfig },
-            })
-            ptyProc.onData((data: string) => {
-              if (ws.readyState === 1) ws.send(data)
-            })
-            ptyProc.onExit((exit: { exitCode: number }) => {
-              setTimeout(() => { if (ws.readyState === 1) ws.close(1000, `exit ${exit.exitCode}`) }, 500)
-            })
-            ws.on('message', (data: any) => {
-              const text = typeof data === 'string' ? data : data.toString('utf8')
-              try {
-                if (ptyProc) {
-                  ptyProc.write(text)
-                }
-              } catch (e) {}
-            })
-            ws.on('close', () => {
-              try { if (ptyProc) ptyProc.kill() } catch (e) {}
-            })
-            return
-          } catch (e: any) {
-            ws.send('[pty fallback: ' + (e?.message || String(e)) + ']\r\n')
-          }
-        }
-
-        const args = ['exec', '-i', pod, '-n', namespace]
-        if (container) args.push('-c', container)
-        args.push('--', '/bin/sh')
-        const proc = spawn('kubectl', args, {
-          env: { ...process.env, KUBECONFIG: kubeconfig },
-        })
-        proc.stdout.on('data', (data: Buffer) => {
-          if (ws.readyState === 1) ws.send(data)
-        })
-        proc.stderr.on('data', (data: Buffer) => {
-          if (ws.readyState === 1) ws.send(data)
-        })
-        proc.on('error', (err: Error) => {
-          if (ws.readyState === 1) ws.send('[spawn error: ' + err.message + ']')
-        })
-        proc.on('close', (code: number) => {
-          setTimeout(() => { if (ws.readyState === 1) ws.close(1000, `exit ${code}`) }, 500)
-        })
-        ws.on('message', (data: any) => {
-          if (proc.stdin.writable) proc.stdin.write(data)
-        })
-        ws.on('close', () => {
-          try { proc.kill() } catch (e) {}
-        })
+        const controller = new AbortController()
+        const session = connectTerminal(ws, subprocess, {
+          kubeconfig, namespace, pod, container,
+          cols: Number(url.searchParams.get('cols')), rows: Number(url.searchParams.get('rows')),
+          protocol: url.searchParams.get('protocol') === '2' ? 'json' : 'raw', signal: controller.signal,
+        }).finally(() => terminalSessions.delete(controller))
+        void session.catch(error => console.error('[k8s-manager] terminal cleanup failed:', error))
+        terminalSessions.set(controller, session)
       })
     },
-  })), 'k8s-manager.ws')
+  }), 'k8s-manager.ws')
 
-  ctx.effect(() => () => {
-    disposers.forEach((d) => d && d())
+  ctx.effect(() => async () => {
     wss.close()
+    for (const { proc } of logSessions.values()) k8s.stopLog(proc)
+    logSessions.clear()
+    for (const controller of terminalSessions.keys()) controller.abort()
+    for (const ws of wss.clients) ws.terminate()
+    const results = await Promise.allSettled(terminalSessions.values())
+    terminalSessions.clear()
+    const failures = results.filter(result => result.status === 'rejected').map(result => result.reason)
+    if (failures.length) throw new AggregateError(failures, 'Kubernetes terminal cleanup failed')
   }, 'k8s-manager.routes')
 }
