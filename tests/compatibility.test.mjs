@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { Readable } from 'node:stream'
+import semver from 'semver'
 import { apply } from '../lib/index.js'
 import manifest from '../package.json' with { type: 'json' }
 
@@ -55,12 +56,38 @@ function harness(stdoutForCommand = () => '/usr/bin/kubectl\n') {
   }
 }
 
-test('manifest targets rc.2 and the replacement client renderer', () => {
-  assert.equal(manifest.peerDependencies['@deepseek-ai/dsh-shell'], '0.2.0-rc.2')
-  assert.equal(manifest.peerDependencies['@deepseek-ai/dsh-subprocess'], '0.2.0-rc.2')
+const dshPeers = ['@deepseek-ai/dsh-shell', '@deepseek-ai/dsh-subprocess', '@deepseek-ai/dsh-host-webserver']
+
+test('manifest declares host compatibility and builds against the current desktop SDK', () => {
+  assert.equal(manifest.version, '0.2.2')
+  assert.ok(semver.validRange(manifest.engines.dsh))
+  for (const name of [...dshPeers, '@deepseek-ai/dsh-client-ui-renderer']) {
+    assert.equal(manifest.devDependencies[name], '0.2.2-rc.1')
+    assert.equal(manifest.dependencies[name], undefined)
+  }
   assert.equal(manifest.dependencies['node-pty'], undefined)
   assert.deepEqual(manifest.dsh.client.inject, ['@deepseek-ai/dsh-client-ui-renderer'])
   assert.equal(manifest.peerDependencies['@deepseek-ai/dsh-settings'], undefined)
+})
+
+test('host and SDK peer ranges accept the supported desktop releases without exemptions', () => {
+  // 0.2.2-rc.1 是当前桌面客户端的运行时；升级客户端后不再需要版本豁免。
+  for (const version of ['0.2.0-rc.2', '0.2.1-rc.1', '0.2.1-rc.2', '0.2.1-rc.3', '0.2.1', '0.2.2-rc.1', '0.2.2']) {
+    assert.ok(semver.satisfies(version, manifest.engines.dsh, { includePrerelease: true }), version)
+    // Older hosts use SDK peers; npm also needs explicit prerelease comparators.
+    for (const name of dshPeers) {
+      assert.ok(semver.satisfies(version, manifest.peerDependencies[name], { includePrerelease: true }), `${name}: ${version}`)
+    }
+  }
+})
+
+test('compatibility declarations still reject releases outside the supported API line', () => {
+  for (const version of ['0.1.0-rc.8', '0.2.0-rc.1', '0.2.1-alpha.5', '0.2.1-rc.0', '0.3.0-0', '0.3.0-rc.1', '1.0.0']) {
+    assert.equal(semver.satisfies(version, manifest.engines.dsh, { includePrerelease: true }), false, version)
+    for (const name of dshPeers) {
+      assert.equal(semver.satisfies(version, manifest.peerDependencies[name], { includePrerelease: true }), false, `${name}: ${version}`)
+    }
+  }
 })
 
 test('foreground commands use asynchronous execute().result()', async () => {

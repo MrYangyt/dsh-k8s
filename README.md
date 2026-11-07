@@ -4,7 +4,7 @@
 
 一个用于 DeepSeek Harness (DSH) 的 Kubernetes 集群管理插件。通过侧栏入口或会话视图管理你的 K8s 集群，界面跟随 DSH 主题。
 
-当前版本：**0.2.0** · 已验证宿主：**DSH 0.2.0-rc.2**。
+当前版本：**0.2.2** · 当前适配宿主：**DSH 0.2.2-rc.1**。
 
 ## 功能特性
 
@@ -19,9 +19,29 @@
 
 ## 版本兼容
 
-当前插件版本为 **0.2.0**，针对 **DSH 0.2.0-rc.2**（Web 和 Desktop）构建。DSH 预发布接口变化较快，本版明确锁定已验证的宿主版本。插件 0.1.0 基于 `@deepseek-ai/dsh-settings ^0.1.0-rc.8`，仅适用于满足其依赖要求的旧宿主。
+当前插件版本为 **0.2.2**，开发 SDK 统一更新到 **0.2.2-rc.1**，适用于 Web 和 Desktop。`package.json` 中的 `engines.dsh` 声明支持范围为：
+
+```text
+0.2.0-rc.2 || >=0.2.1-rc.1 <0.3.0-0
+```
+
+该范围保留此前已验证的 **DSH 0.2.0-rc.2**，并覆盖 **0.2.1-rc.1** 与 **0.2.2-rc.1** 两个预发布系列；当前适配环境实际使用 **DSH 0.2.2-rc.1**（桌面客户端随附运行时）。DSH 在安装和 profile 启动时都会校验 `engines.dsh`，不满足范围的插件会被直接跳过；本版范围覆盖 0.2.1 与 0.2.2，升级桌面客户端后无需开启不兼容插件的风险豁免。后续 DSH 版本仍需核对接口及支持范围。
+
+插件 0.1.0 基于 `@deepseek-ai/dsh-settings ^0.1.0-rc.8`，仅适用于满足其依赖要求的旧宿主。
 
 0.2 迁移使用 `dsh-client-ui-renderer` 提供客户端插槽，普通宿主命令使用 `shell.execute()`，交互式终端使用 DSH 的 `subprocess.spawnTerminal()`；不再依赖已移除的 `dsh-client-runtime` 或未使用的 `dsh-settings`。
+
+### 0.2.2 更新
+
+- 修复桌面客户端升级到 **DSH 0.2.2-rc.1** 后插件不加载的问题：旧版 `engines.dsh` 上限为 `<0.2.2-0`，被宿主的兼容性校验判定为不兼容并跳过
+- 兼容范围扩展到 `<0.3.0-0`，同时保留 0.2.0/0.2.1 的支持；`peerDependencies` 中的 shell、subprocess、host-webserver 同步放宽
+- 开发 SDK 升级到 `0.2.2-rc.1`，宿主侧 `shell`、`subprocess`、`webServer` 接口与客户端插槽契约在 0.2.1 → 0.2.2 之间保持一致，因此无需改动业务代码，仅重新构建产物
+- 兼容性测试覆盖 `0.2.2-rc.1` 与正式版 `0.2.2`，并确认仍拒绝 `0.3.0` 及更早的 0.2.0-rc.1、0.2.1-alpha 等未验证版本
+
+### 0.2.1 更新
+
+- 采用新版 DSH 的 `engines.dsh` 兼容声明，修复升级客户端后因旧 SDK 精确版本而被判定不兼容的问题
+- 开发 SDK 统一升级到 `0.2.1-rc.2`，继续使用宿主提供的 shell、Web 服务和托管 PTY
 
 ### 0.2.0 更新
 
@@ -35,7 +55,7 @@
 
 ### 准备条件
 
-- DSH **0.2.0-rc.2**
+- DSH **0.2.2-rc.1**（推荐，即当前桌面客户端随附运行时），或符合上述 `engines.dsh` 范围的版本
 - 本地安装 `kubectl`，并确保启动 DSH 的用户可以从 `PATH` 找到它
 - 可用的 kubeconfig，以及查看目标资源的 Kubernetes 权限
 - 从源码构建时需要 Node.js **24 或以上**和 npm
@@ -53,11 +73,20 @@ npm run build
 2. 选择从本地目录安装，选中刚构建的 `dsh-k8s` 项目根目录（包含 `package.json`）
 3. 安装完成后重启客户端，点击左侧 **Kubernetes**
 
-桌面客户端管理自己的 `desktop` profile。终端中的 npm CLI 可能使用另一版本的运行时，请通过桌面客户端管理插件。
+桌面客户端使用随附的 DSH 运行时，并管理自己的 `desktop` profile。终端中的全局 `dsh` CLI 是独立安装，升级桌面客户端不会同步升级它；桌面插件请通过桌面客户端管理。
+
+如需将全局 CLI 升级到本次适配的版本：
+
+```bash
+npm install -g @deepseek-ai/dsh@0.2.2-rc.1
+dsh --version
+```
+
+确认输出为 `0.2.2-rc.1`。此命令更新终端中的全局 CLI，不会替换桌面客户端随附的运行时；桌面插件以客户端随附的 0.2.2-rc.1 为准。
 
 ### Web：直接从 GitHub 安装
 
-确认 `dsh` CLI 本身使用兼容的 0.2.0-rc.2 运行时，然后安装：
+先运行 `dsh --version`，确认 CLI 使用上述兼容范围内的运行时（推荐 `0.2.2-rc.1`），然后安装：
 
 ```bash
 dsh plugin --profile web add github:MrYangyt/dsh-k8s
@@ -97,7 +126,7 @@ npm ci
 npm run build
 ```
 
-然后重启 DSH。若客户端仍加载旧版本，在插件管理中重新选择这个目录安装。仅刷新管理页面不会重新加载后端模块。
+已有的本地目录链接仍然有效，无需先卸载插件或删除集群配置。构建完成后重启 DSH；若客户端仍加载旧版本，在插件管理中重新选择这个目录安装。仅刷新管理页面不会重新加载后端模块。
 
 从插件 0.1.0 升级后，集群配置仍使用原来的 `~/.kube/configs/`，无需重新添加。GitHub 安装可重新执行安装命令；若之前锁定了 commit，请换成新 commit。
 
@@ -254,7 +283,18 @@ dsh-k8s-manager/
 
 ### 安装提示与 DSH 不兼容
 
-本版插件要求 DSH 0.2.0-rc.2 的 shell、subprocess 和 webserver SDK。如果错误仍显示 `dsh-k8s-manager@0.1.0` 或要求 `@deepseek-ai/dsh-settings ^0.1.0-rc.8`，说明加载的是旧版本；更新项目、重新构建并重新安装项目目录，再重启 DSH。
+本版通过 `engines.dsh`（`0.2.0-rc.2 || >=0.2.1-rc.1 <0.3.0-0`）声明兼容范围，开发 SDK 使用 `0.2.2-rc.1`。如果升级桌面客户端到 0.2.2-rc.1 后看到类似报错：
+
+```text
+dsh: installation rejected: Plugin dsh-k8s-manager@0.2.1 is incompatible with dsh 0.2.2-rc.1:
+requirements {"engines.dsh":"0.2.0-rc.2 || >=0.2.1-rc.1 <0.2.2-0"}
+```
+
+说明加载的仍是 `0.2.1` 或更早的旧构建，其上限 `<0.2.2-0` 不含 0.2.2-rc.1。更新项目、重新 `npm ci && npm run build` 并重启 DSH；必要时在插件管理中重新选择本地目录安装，无需删除 `~/.kube/configs/`。
+
+本版已经修复该问题，正常情况下不再需要风险豁免。只有当插件版本仍低于 0.2.2、而你又必须临时加载时，才需要在下一次构建前执行 `dsh plugin allow-version`；恢复本版后应撤销豁免。
+
+如果错误显示 `dsh-k8s-manager@0.1.0` 或要求 `@deepseek-ai/dsh-settings ^0.1.0-rc.8`，同样需要更新旧插件。桌面客户端的版本以其随附运行时为准，`dsh --version` 仅反映当前终端命中的 CLI 版本。
 
 ### 安装提示 minimumReleaseAge 或供应链策略失败
 

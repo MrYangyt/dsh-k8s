@@ -4,7 +4,7 @@
 
 A Kubernetes cluster manager for DeepSeek Harness (DSH). Manage your K8s clusters from a sidebar entry or conversation view, with a UI that follows the DSH theme.
 
-Current version: **0.2.0** · Verified host: **DSH 0.2.0-rc.2**.
+Current version: **0.2.2** · Current target host: **DSH 0.2.2-rc.1**.
 
 ## Features
 
@@ -19,9 +19,29 @@ Current version: **0.2.0** · Verified host: **DSH 0.2.0-rc.2**.
 
 ## Compatibility
 
-Plugin **0.2.0** targets **DSH 0.2.0-rc.2** (Web and Desktop). DSH prerelease APIs change frequently, so this release pins the verified host SDK version. Plugin 0.1.0 was based on `@deepseek-ai/dsh-settings ^0.1.0-rc.8` and is only suitable for older hosts that meet its dependency requirements.
+Plugin **0.2.2** updates all development SDKs to **0.2.2-rc.1** for Web and Desktop. The supported host range is declared in `package.json` through `engines.dsh`:
+
+```text
+0.2.0-rc.2 || >=0.2.1-rc.1 <0.3.0-0
+```
+
+This retains the previously verified **DSH 0.2.0-rc.2** and spans both the **0.2.1-rc.1** and **0.2.2-rc.1** prerelease lines. The current target environment runs **DSH 0.2.2-rc.1**, the runtime bundled with the desktop client. DSH validates `engines.dsh` on both installation and profile startup and silently skips plugins outside that range, so this range covers 0.2.1 and 0.2.2 without an incompatible-plugin risk override. Later DSH releases still require an API and support-range review.
+
+Plugin 0.1.0 was based on `@deepseek-ai/dsh-settings ^0.1.0-rc.8` and is only suitable for older hosts that meet its dependency requirements.
 
 The 0.2 migration uses `dsh-client-ui-renderer` for client slots, `shell.execute()` for ordinary host commands, and DSH's `subprocess.spawnTerminal()` for interactive terminals. It no longer depends on the removed `dsh-client-runtime` or the unused `dsh-settings`.
+
+### Changes in 0.2.2
+
+- Fixes the plugin not loading after the desktop client upgrades to **DSH 0.2.2-rc.1**: the previous `engines.dsh` upper bound was `<0.2.2-0`, so the host compatibility check rejected it and skipped the bundle
+- Extends the range to `<0.3.0-0` while keeping 0.2.0/0.2.1 support, and widens the `peerDependencies` for shell, subprocess, and host-webserver to match
+- Updates development SDKs to `0.2.2-rc.1`; the host `shell`, `subprocess`, and `webServer` contracts and the client slot contract are unchanged between 0.2.1 and 0.2.2, so only the build artifacts changed
+- Compatibility tests now cover `0.2.2-rc.1` and the stable `0.2.2`, and still reject `0.3.0` plus unverified releases such as 0.2.0-rc.1 and 0.2.1-alpha
+
+### Changes in 0.2.1
+
+- Uses the `engines.dsh` compatibility declaration supported by newer DSH releases, fixing incompatibility reports caused by the old exact SDK versions after a host upgrade
+- Updates development SDKs to `0.2.1-rc.2` while continuing to use the host shell, Web server, and managed PTY
 
 ### Changes in 0.2.0
 
@@ -35,7 +55,7 @@ The 0.2 migration uses `dsh-client-ui-renderer` for client slots, `shell.execute
 
 ### Prerequisites
 
-- DSH **0.2.0-rc.2**
+- DSH **0.2.2-rc.1** (recommended — the runtime bundled with the current desktop client), or a version within the `engines.dsh` range above
 - `kubectl` installed locally and accessible on `PATH` to the user running DSH
 - A valid kubeconfig and Kubernetes permissions to view the target resources
 - Node.js **24 or later** and npm when building from source
@@ -53,11 +73,20 @@ npm run build
 2. Choose installation from a local directory and select the built `dsh-k8s` project root containing `package.json`
 3. Restart the client after installation, then click **Kubernetes** in the sidebar
 
-Desktop manages its own `desktop` profile. The npm CLI in your terminal may use a different runtime version, so manage desktop plugins through the desktop client.
+Desktop uses its bundled DSH runtime and manages its own `desktop` profile. The global `dsh` CLI in your terminal is installed separately; updating Desktop does not update that CLI. Manage desktop plugins through the desktop client.
+
+To update the global CLI to the version targeted by this release:
+
+```bash
+npm install -g @deepseek-ai/dsh@0.2.2-rc.1
+dsh --version
+```
+
+Confirm that the output is `0.2.2-rc.1`. This updates the global CLI in your terminal and does not replace the runtime bundled with Desktop; desktop plugins always run against the client's own 0.2.2-rc.1 runtime.
 
 ### Web: Install directly from GitHub
 
-Ensure the `dsh` CLI itself uses a compatible 0.2.0-rc.2 runtime, then install:
+Run `dsh --version` first and ensure the CLI runtime is within the supported range above (`0.2.2-rc.1` recommended), then install:
 
 ```bash
 dsh plugin --profile web add github:MrYangyt/dsh-k8s
@@ -97,7 +126,7 @@ npm ci
 npm run build
 ```
 
-Then restart DSH. If the client still loads the old version, select this directory again in plugin management to reinstall it. Refreshing the management page alone does not reload host modules.
+An existing local-directory link remains valid. There is no need to uninstall the plugin or remove cluster configurations first. Restart DSH after the build; if the client still loads the old version, select this directory again in plugin management to reinstall it. Refreshing the management page alone does not reload host modules.
 
 Upgrading from plugin 0.1.0 continues to use the existing `~/.kube/configs/` files, so clusters do not need to be added again. For a GitHub installation, run the installation command again; if you previously pinned a commit, replace it with the new commit.
 
@@ -254,7 +283,18 @@ The plugin has not found any configs in `~/.kube/configs/`. Click **管理集群
 
 ### Installation reports incompatibility with DSH
 
-This release requires the shell, subprocess, and webserver SDKs from DSH 0.2.0-rc.2. If the error still mentions `dsh-k8s-manager@0.1.0` or requires `@deepseek-ai/dsh-settings ^0.1.0-rc.8`, an older version is being loaded. Update the project, rebuild, reinstall the project directory, and restart DSH.
+This release declares `engines.dsh` as `0.2.0-rc.2 || >=0.2.1-rc.1 <0.3.0-0` and uses development SDKs at `0.2.2-rc.1`. If the desktop client upgraded to 0.2.2-rc.1 reports something like:
+
+```text
+dsh: installation rejected: Plugin dsh-k8s-manager@0.2.1 is incompatible with dsh 0.2.2-rc.1:
+requirements {"engines.dsh":"0.2.0-rc.2 || >=0.2.1-rc.1 <0.2.2-0"}
+```
+
+the old 0.2.1 (or earlier) build is still being loaded — its `<0.2.2-0` upper bound excludes 0.2.2-rc.1. Update the project, run `npm ci && npm run build`, and restart DSH. If needed, select the local directory again in plugin management; do not remove `~/.kube/configs/`.
+
+This release fixes that case, so a risk override is normally unnecessary. Only an older plugin build that must be loaded temporarily needs `dsh plugin allow-version`, and that exemption should be revoked once this version is installed.
+
+If the error mentions `dsh-k8s-manager@0.1.0` or requires `@deepseek-ai/dsh-settings ^0.1.0-rc.8`, update that older plugin as well. Desktop uses its bundled runtime version; `dsh --version` reports only the CLI resolved by your current terminal.
 
 ### Installation fails a minimumReleaseAge or supply-chain policy check
 
