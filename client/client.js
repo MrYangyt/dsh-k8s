@@ -13041,6 +13041,7 @@ function parseResourceTable(table, items) {
 	const nameColumn = headers.indexOf("NAME");
 	const namespaceColumn = headers.indexOf("NAMESPACE");
 	const itemLookup = new Map(items.map((item, index) => [`${item.namespace}/${item.name}`, index]));
+	const nameLookup = namespaceColumn < 0 && items.every((item) => item.namespace === items[0]?.namespace) ? new Map(items.map((item, index) => [item.name, index])) : /* @__PURE__ */ new Map();
 	return {
 		headers,
 		rows: lines.slice(1).map((line) => {
@@ -13048,7 +13049,7 @@ function parseResourceTable(table, items) {
 			const namespace = namespaceColumn < 0 ? "" : cells[namespaceColumn];
 			return {
 				cells,
-				itemIndex: itemLookup.get(`${namespace}/${cells[nameColumn]}`) ?? -1
+				itemIndex: itemLookup.get(`${namespace}/${cells[nameColumn]}`) ?? nameLookup.get(cells[nameColumn]) ?? -1
 			};
 		})
 	};
@@ -13317,6 +13318,8 @@ const state = {
 	items: [],
 	tableLoading: false,
 	tableError: "",
+	scope: "cluster",
+	scopeNamespace: "",
 	filter: "",
 	nsFilter: "all",
 	statusFilter: "all",
@@ -13454,7 +13457,9 @@ async function loadKind(kind, statusFilter = "all", preserveFilters = false) {
 		set({
 			tableLoading: false,
 			table: r.table || "",
-			items: r.items || []
+			items: r.items || [],
+			scope: r.scope === "namespace" ? "namespace" : "cluster",
+			scopeNamespace: r.namespace || ""
 		});
 	} catch (e) {
 		if (viewRequest === request && state.current === context) set({
@@ -13530,7 +13535,7 @@ function OverviewView() {
 		{
 			value: ov.nodes?.total || 0,
 			label: "节点总数",
-			hint: "查看集群节点",
+			hint: ov.nodes?.derived ? "按当前命名空间的 Pod 分布推算" : "查看集群节点",
 			kind: "nodes",
 			filter: "all",
 			tone: "neutral"
@@ -13538,7 +13543,7 @@ function OverviewView() {
 		{
 			value: ov.nodes?.ready || 0,
 			label: "就绪节点",
-			hint: "已准备好运行工作负载",
+			hint: ov.nodes?.derived ? "按当前命名空间的 Pod 分布推算" : "已准备好运行工作负载",
 			kind: "nodes",
 			filter: "Ready",
 			tone: "ok"
@@ -13576,7 +13581,10 @@ function OverviewView() {
 			tone: "neutral"
 		}
 	];
-	return react.createElement("div", { className: "k8s-content" }, react.createElement("div", { className: "k8s-page-head" }, react.createElement("div", { className: "k8s-heading" }, react.createElement("h2", null, "集群概览"), react.createElement("p", { className: "k8s-subtitle" }, "快速了解集群状态，点击卡片查看对应资源。")), ov.serverVersion && react.createElement("span", { className: "k8s-badge neutral" }, ov.serverVersion)), react.createElement("div", { className: "k8s-stat-grid" }, cards.map((card) => react.createElement("button", {
+	return react.createElement("div", { className: "k8s-content" }, react.createElement("div", { className: "k8s-page-head" }, react.createElement("div", { className: "k8s-heading" }, react.createElement("h2", null, "集群概览"), react.createElement("p", { className: "k8s-subtitle" }, "快速了解集群状态，点击卡片查看对应资源。")), ov.scope === "namespace" && react.createElement("span", {
+		className: "k8s-badge warn",
+		title: "该账号没有集群级读取权限"
+	}, `仅命名空间 ${ov.namespace}`), ov.serverVersion && react.createElement("span", { className: "k8s-badge neutral" }, ov.serverVersion)), react.createElement("div", { className: "k8s-stat-grid" }, cards.map((card) => react.createElement("button", {
 		key: card.label,
 		className: "k8s-stat-card",
 		type: "button",
@@ -13605,7 +13613,10 @@ function ResourceTable() {
 		const item = s.items[row.itemIndex];
 		return (s.nsFilter === "all" || item?.namespace === s.nsFilter) && (s.statusFilter === "all" || (s.view === "nodes" ? item?.ready ? "Ready" : "NotReady" : item?.phase) === s.statusFilter) && (!s.filter || row.cells.join(" ").toLowerCase().includes(s.filter.toLowerCase()));
 	});
-	return react.createElement("div", { className: "k8s-content" }, react.createElement("div", { className: "k8s-page-head" }, react.createElement("div", { className: "k8s-heading" }, react.createElement("h2", null, KIND_LABEL[s.view] || s.view), react.createElement("p", { className: "k8s-subtitle" }, "点击资源名称查看 YAML" + (s.view === "pods" ? "、日志或进入终端。" : " 和管理操作。"))), react.createElement("span", { className: "k8s-count" }, `${s.items.length} 个资源`)), react.createElement("div", { className: "k8s-toolbar" }, namespaces.length > 1 && react.createElement("select", {
+	return react.createElement("div", { className: "k8s-content" }, react.createElement("div", { className: "k8s-page-head" }, react.createElement("div", { className: "k8s-heading" }, react.createElement("h2", null, KIND_LABEL[s.view] || s.view), react.createElement("p", { className: "k8s-subtitle" }, "点击资源名称查看 YAML" + (s.view === "pods" ? "、日志或进入终端。" : " 和管理操作。"))), s.scope === "namespace" && react.createElement("span", {
+		className: "k8s-badge warn",
+		title: "该账号没有集群级读取权限，仅列出 context 默认命名空间"
+	}, `仅命名空间 ${s.scopeNamespace}`), react.createElement("span", { className: "k8s-count" }, `${s.items.length} 个资源`)), react.createElement("div", { className: "k8s-toolbar" }, namespaces.length > 1 && react.createElement("select", {
 		className: "k8s-select",
 		"aria-label": "筛选命名空间",
 		value: s.nsFilter,

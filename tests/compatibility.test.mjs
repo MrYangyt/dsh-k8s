@@ -5,7 +5,7 @@ import semver from 'semver'
 import { apply } from '../lib/index.js'
 import manifest from '../package.json' with { type: 'json' }
 
-function harness(stdoutForCommand = () => '/usr/bin/kubectl\n') {
+function harness(stdoutForCommand = () => '/usr/bin/kubectl\n', resultForCommand = null) {
   const routes = new Map()
   const upgrades = new Map()
   const effects = []
@@ -18,7 +18,9 @@ function harness(stdoutForCommand = () => '/usr/bin/kubectl\n') {
         status: 'running',
         readOutput: () => ({ delta: 'pod output', lossy: false }),
         kill: () => { killed = true; proc.status = 'killed' },
-        result: async () => ({ exitCode: 0, stdout: { text: stdoutForCommand(spec.command) }, stderr: { text: '' } }),
+        result: async () => resultForCommand
+          ? resultForCommand(spec.command)
+          : ({ exitCode: 0, stdout: { text: stdoutForCommand(spec.command) }, stderr: { text: '' } }),
         get killed() { return killed },
       }
       executions.push({ spec, proc })
@@ -150,6 +152,86 @@ new-node     Unknown                    <none>   1m    v1.34.0\n`
       { name: 'unknown', namespace: '', created: '', ready: false },
       { name: 'new-node', namespace: '', created: '', ready: false },
     ])
+  } finally { host.dispose() }
+})
+
+const forbidden = text => ({ exitCode: 1, stdout: { text: '' }, stderr: { text: `Error from server (Forbidden): ${text} at the cluster scope` } })
+const ok = text => ({ exitCode: 0, stdout: { text }, stderr: { text: '' } })
+
+test('命名空间级权限：-A 被拒绝时回退到 context 默认命名空间', async () => {
+  const table = `NAME       READY   STATUS    RESTARTS   AGE
+api-abc    1/1     Running   0          5m\n`
+  const pods = { items: [{ metadata: { name: 'api-abc', namespace: 'team-a', creationTimestamp: '' }, status: { phase: 'Running' } }] }
+  const host = harness(undefined, command => {
+    if (/kubectl get 'pods' -A/.test(command)) return forbidden('pods is forbidden: User "dev" cannot list resource "pods" in API group ""')
+    if (/config view --minify/.test(command)) return ok('team-a\n')
+    return ok(/-o json$/.test(command) ? JSON.stringify(pods) : table)
+  })
+  try {
+    const result = await host.call('list', { context: 'test', kind: 'pods' })
+    assert.equal(result.ok, true)
+    assert.equal(result.scope, 'namespace')
+    assert.equal(result.namespace, 'team-a')
+    assert.deepEqual(result.items, [{ name: 'api-abc', namespace: 'team-a', created: '', phase: 'Running' }])
+    assert.ok(host.executions.some(({ spec }) => /kubectl get 'pods' -n 'team-a' -o json$/.test(spec.command)))
+  } finally { host.dispose() }
+})
+
+test('命名空间级权限且 context 未设置 namespace 时给出可操作的提示', async () => {
+  const host = harness(undefined, command => /-A\b/.test(command)
+    ? forbidden('pods is forbidden')
+    : ok(''))
+  try {
+    const result = await host.call('list', { context: 'test', kind: 'pods' })
+    assert.equal(result.ok, false)
+    assert.match(result.error, /context 未设置 namespace/)
+  } finally { host.dispose() }
+})
+
+test('集群级读取被拒绝时概览仍可用，节点数按 Pod 分布推算', async () => {
+  const pods = { items: [
+    { metadata: { name: 'a', namespace: 'team-a' }, spec: { nodeName: 'node-1' }, status: { phase: 'Running' } },
+    { metadata: { name: 'b', namespace: 'team-a' }, spec: { nodeName: 'node-1' }, status: { phase: 'Running' } },
+    { metadata: { name: 'c', namespace: 'team-a' }, spec: { nodeName: 'node-2' }, status: { phase: 'Pending' } },
+  ] }
+  const host = harness(undefined, command => {
+    if (/kubectl get nodes|kubectl get namespaces|kubectl get pods -A/.test(command)) return forbidden('cannot list resource')
+    if (/config view --minify/.test(command)) return ok('team-a\n')
+    if (/kubectl version/.test(command)) return ok(JSON.stringify({ serverVersion: { gitVersion: 'v1.32.9' } }))
+    return ok(JSON.stringify(pods))
+  })
+  try {
+    const result = await host.call('overview', { context: 'test' })
+    assert.equal(result.ok, true)
+    assert.equal(result.scope, 'namespace')
+    assert.equal(result.namespace, 'team-a')
+    assert.deepEqual(result.nodes, { total: 2, ready: 2, derived: true })
+    assert.equal(result.namespaces, 1)
+    assert.equal(result.pods.Running, 2)
+    assert.equal(result.pods.Pending, 1)
+    assert.equal(result.serverVersion, 'v1.32.9')
+  } finally { host.dispose() }
+})
+
+test('集群级权限正常时概览仍使用真实节点与命名空间数据', async () => {
+  const nodes = { items: [
+    { metadata: { name: 'node-1' }, status: { conditions: [{ type: 'Ready', status: 'True' }] } },
+    { metadata: { name: 'node-2' }, status: { conditions: [{ type: 'Ready', status: 'False' }] } },
+  ] }
+  const namespaces = { items: [{ metadata: { name: 'default' } }, { metadata: { name: 'team-a' } }] }
+  const pods = { items: [{ metadata: { name: 'a', namespace: 'team-a' }, spec: { nodeName: 'node-1' }, status: { phase: 'Running' } }] }
+  const host = harness(undefined, command => {
+    if (/kubectl get nodes/.test(command)) return ok(JSON.stringify(nodes))
+    if (/kubectl get namespaces/.test(command)) return ok(JSON.stringify(namespaces))
+    if (/kubectl version/.test(command)) return ok(JSON.stringify({ serverVersion: { gitVersion: 'v1.32.9' } }))
+    return ok(JSON.stringify(pods))
+  })
+  try {
+    const result = await host.call('overview', { context: 'test' })
+    assert.equal(result.ok, true)
+    assert.equal(result.scope, 'cluster')
+    assert.deepEqual(result.nodes, { total: 2, ready: 1, derived: false })
+    assert.equal(result.namespaces, 2)
   } finally { host.dispose() }
 })
 
