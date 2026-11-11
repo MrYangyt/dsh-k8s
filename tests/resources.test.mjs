@@ -27,6 +27,23 @@ prod        api    1/1     Running   9d`
   assert.deepEqual(rows.map(row => row.itemIndex), [1, 0])
 })
 
+test('单命名空间列表没有 NAMESPACE 列时按名称关联资源', () => {
+  // `-n <ns>` 或 context 默认命名空间下的 kubectl 输出没有 NAMESPACE 列。
+  const table = `NAME       READY   STATUS    RESTARTS   AGE
+api-abc    1/1     Running   0          5m
+api-def    0/1     Pending   0          10s`
+  const { headers, rows } = parseResourceTable(table, [item('api-def', 'team-a'), item('api-abc', 'team-a')])
+  assert.deepEqual(headers, ['NAME', 'READY', 'STATUS', 'RESTARTS', 'AGE'])
+  assert.deepEqual(rows.map(row => row.itemIndex), [1, 0])
+})
+
+test('没有 NAMESPACE 列但资源跨命名空间时不猜测，避免打开错误详情', () => {
+  const table = `NAME   READY   STATUS
+api    1/1     Running`
+  const { rows } = parseResourceTable(table, [item('api', 'prod'), item('api', 'staging')])
+  assert.equal(rows[0].itemIndex, -1)
+})
+
 test('集群级表关联无命名空间资源，保留复合节点状态', () => {
   const table = `NAME                  STATUS                     ROLES           AGE   VERSION
 node-worker-01        Ready                      <none>          45d   v1.34.0

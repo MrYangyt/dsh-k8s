@@ -13,10 +13,15 @@ export function parseResourceTable(table: string, items: ResourceItem[]) {
   const nameColumn = headers.indexOf('NAME')
   const namespaceColumn = headers.indexOf('NAMESPACE')
   const itemLookup = new Map(items.map((item, index) => [`${item.namespace}/${item.name}`, index]))
+  // A single-namespace listing (`-n <ns>`, or a context default namespace) omits
+  // the NAMESPACE column, so rows can only be resolved by name.
+  const nameLookup = namespaceColumn < 0 && items.every(item => item.namespace === items[0]?.namespace)
+    ? new Map(items.map((item, index) => [item.name, index]))
+    : new Map<string, number>()
   const rows = lines.slice(1).map(line => {
     const cells = columns.map((column, index) => line.slice(column.index, columns[index + 1]?.index).trim())
     const namespace = namespaceColumn < 0 ? '' : cells[namespaceColumn]
-    const itemIndex = itemLookup.get(`${namespace}/${cells[nameColumn]}`) ?? -1
+    const itemIndex = itemLookup.get(`${namespace}/${cells[nameColumn]}`) ?? nameLookup.get(cells[nameColumn]) ?? -1
     return { cells, itemIndex }
   })
   return { headers, rows }

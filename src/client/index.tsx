@@ -46,6 +46,8 @@ interface StoreState {
   items: { name: string; namespace: string; created: string; phase?: string; ready?: boolean }[]
   tableLoading: boolean
   tableError: string
+  scope: 'cluster' | 'namespace'
+  scopeNamespace: string
   filter: string
   nsFilter: string
   statusFilter: string
@@ -85,6 +87,8 @@ const state: StoreState = {
   items: [],
   tableLoading: false,
   tableError: '',
+  scope: 'cluster',
+  scopeNamespace: '',
   filter: '',
   nsFilter: 'all',
   statusFilter: 'all',
@@ -151,7 +155,7 @@ async function loadKind(kind: string, statusFilter = 'all', preserveFilters = fa
     const r = await call('list', { context, kind })
     if (viewRequest !== request || state.current !== context) return
     if (!r.ok) { set({ tableLoading: false, tableError: r.error, table: '', items: [] }); return }
-    set({ tableLoading: false, table: r.table || '', items: r.items || [] })
+    set({ tableLoading: false, table: r.table || '', items: r.items || [], scope: r.scope === 'namespace' ? 'namespace' : 'cluster', scopeNamespace: r.namespace || '' })
   } catch (e: any) {
     if (viewRequest === request && state.current === context) set({ tableLoading: false, tableError: e?.message || String(e), table: '', items: [] })
   }
@@ -194,8 +198,8 @@ function OverviewView() {
   const ov = s.overview
   const pods = ov.pods || {}
   const cards = [
-    { value: ov.nodes?.total || 0, label: '节点总数', hint: '查看集群节点', kind: 'nodes', filter: 'all', tone: 'neutral' },
-    { value: ov.nodes?.ready || 0, label: '就绪节点', hint: '已准备好运行工作负载', kind: 'nodes', filter: 'Ready', tone: 'ok' },
+    { value: ov.nodes?.total || 0, label: '节点总数', hint: ov.nodes?.derived ? '按当前命名空间的 Pod 分布推算' : '查看集群节点', kind: 'nodes', filter: 'all', tone: 'neutral' },
+    { value: ov.nodes?.ready || 0, label: '就绪节点', hint: ov.nodes?.derived ? '按当前命名空间的 Pod 分布推算' : '已准备好运行工作负载', kind: 'nodes', filter: 'Ready', tone: 'ok' },
     { value: pods.Running || 0, label: '运行中的 Pod', hint: '查看运行中的工作负载', kind: 'pods', filter: 'Running', tone: 'ok' },
     { value: pods.Pending || 0, label: '等待中的 Pod', hint: '检查调度或启动状态', kind: 'pods', filter: 'Pending', tone: 'warn' },
     { value: pods.Failed || 0, label: '失败的 Pod', hint: '检查故障工作负载', kind: 'pods', filter: 'Failed', tone: 'error' },
@@ -207,6 +211,7 @@ function OverviewView() {
         React.createElement('h2', null, '集群概览'),
         React.createElement('p', { className: 'k8s-subtitle' }, '快速了解集群状态，点击卡片查看对应资源。')
       ),
+      ov.scope === 'namespace' && React.createElement('span', { className: 'k8s-badge warn', title: '该账号没有集群级读取权限' }, `仅命名空间 ${ov.namespace}`),
       ov.serverVersion && React.createElement('span', { className: 'k8s-badge neutral' }, ov.serverVersion)
     ),
     React.createElement('div', { className: 'k8s-stat-grid' }, cards.map(card =>
@@ -246,6 +251,7 @@ function ResourceTable() {
         React.createElement('h2', null, KIND_LABEL[s.view] || s.view),
         React.createElement('p', { className: 'k8s-subtitle' }, '点击资源名称查看 YAML' + (s.view === 'pods' ? '、日志或进入终端。' : ' 和管理操作。'))
       ),
+      s.scope === 'namespace' && React.createElement('span', { className: 'k8s-badge warn', title: '该账号没有集群级读取权限，仅列出 context 默认命名空间' }, `仅命名空间 ${s.scopeNamespace}`),
       React.createElement('span', { className: 'k8s-count' }, `${s.items.length} 个资源`)
     ),
     React.createElement('div', { className: 'k8s-toolbar' },
