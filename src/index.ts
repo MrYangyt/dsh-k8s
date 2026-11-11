@@ -50,11 +50,51 @@ function lastErr(r: ShellRunResult): string {
   return r.stderr?.text?.slice(-500) || ''
 }
 
+/** Cluster-scoped reads fail with Forbidden when the account is namespace-scoped. */
+function denied(r: ShellRunResult): boolean {
+  const text = (r.stderr?.text || '') + (r.stdout?.text || '')
+  return /forbidden|cannot (list|get|watch) resource/i.test(text) || /at the cluster scope/i.test(text)
+}
+
 class K8sService {
   constructor(private shellSvc: ShellService, private configsDir: string) {}
 
   private kubeconfigPath(clusterName: string): string {
     return path.join(this.configsDir, `${clusterName}.yaml`)
+  }
+
+  private nsCache = new Map<string, string>()
+
+  /**
+   * Namespace that a bare `kubectl get <kind>` resolves to: the kubeconfig
+   * context's `namespace`. Cached because every scoped read needs it.
+   */
+  private async contextNamespace(clusterName: string): Promise<string> {
+    const cached = this.nsCache.get(clusterName)
+    if (cached !== undefined) return cached
+    const r = await this.run('kubectl config view --minify -o jsonpath={..namespace}', clusterName, 10000)
+    const ns = r.exitCode === 0 ? (r.stdout.text || '').trim() : ''
+    const value = isName(ns) ? ns : ''
+    this.nsCache.set(clusterName, value)
+    return value
+  }
+
+  private nodeStats(items: any[]) {
+    const ready = items.filter((n: any) => {
+      const cs = (n.status && n.status.conditions) || []
+      return cs.some((x: any) => x.type === 'Ready' && x.status === 'True')
+    }).length
+    return { total: items.length, ready, derived: false }
+  }
+
+  /** Node objects need cluster scope; infer the footprint of authorized pods instead. */
+  private nodeStatsFromPods(podItems: any[]) {
+    const seen = new Set<string>()
+    for (const pod of podItems) {
+      const node = pod.spec && pod.spec.nodeName
+      if (node) seen.add(node)
+    }
+    return { total: seen.size, ready: seen.size, derived: true }
   }
 
   private async run(command: string, clusterName: string, timeoutMs?: number, maxBytes?: number): Promise<ShellRunResult> {
@@ -133,20 +173,31 @@ class K8sService {
       this.run('kubectl get namespaces -o json', clusterName, 15000),
       this.run('kubectl version -o json', clusterName, 15000),
     ])
-    if (nodesR.exitCode !== 0) {
-      return fail('连接集群失败: ' + (lastErr(nodesR) || 'unknown'))
+    // Pods are the only signal that works for every account, so they decide
+    // connectivity and fall back to the context namespace when `-A` is denied.
+    let podsR2 = podsR
+    let scope: 'cluster' | 'namespace' = 'cluster'
+    let namespace = ''
+    if (denied(podsR)) {
+      namespace = await this.contextNamespace(clusterName)
+      if (namespace) {
+        scope = 'namespace'
+        podsR2 = await this.run('kubectl get pods -n ' + shq(namespace) + ' -o json', clusterName, 30000)
+      }
     }
-    const nodes = this.safeJson(nodesR.stdout.text)
-    const pods = this.safeJson(podsR.stdout.text)
-    const ns = this.safeJson(nsR.stdout.text)
+    if (podsR2.exitCode !== 0) {
+      return fail('连接集群失败: ' + (lastErr(podsR2) || 'unknown'))
+    }
+    const podItems = this.safeJson(podsR2.stdout.text).items || []
+    // Node and namespace counts need cluster scope; keep the overview usable by
+    // deriving what the authorized pods reveal instead of failing the page.
+    const nodes = denied(nodesR)
+      ? this.nodeStatsFromPods(podItems)
+      : this.nodeStats(this.safeJson(nodesR.stdout.text).items || [])
+    const namespaceCount = denied(nsR)
+      ? (namespace ? 1 : 0)
+      : (this.safeJson(nsR.stdout.text).items || []).length
     const ver = this.safeJson(verR.stdout.text)
-    const nodeItems = nodes.items || []
-    const podItems = pods.items || []
-    const nsItems = ns.items || []
-    const readyNodes = nodeItems.filter((n: any) => {
-      const cs = (n.status && n.status.conditions) || []
-      return cs.some((x: any) => x.type === 'Ready' && x.status === 'True')
-    }).length
     const podStats: Record<string, number> = { Running: 0, Pending: 0, Failed: 0, Succeeded: 0, Unknown: 0 }
     podItems.forEach((p: any) => {
       const ph = (p.status && p.status.phase) || 'Unknown'
@@ -154,9 +205,11 @@ class K8sService {
     })
     return {
       ok: true,
-      nodes: { total: nodeItems.length, ready: readyNodes },
+      nodes,
       pods: podStats,
-      namespaces: nsItems.length,
+      namespaces: namespaceCount,
+      scope,
+      namespace,
       serverVersion: (ver.serverVersion && ver.serverVersion.gitVersion) || '',
     }
   }
@@ -165,11 +218,25 @@ class K8sService {
     const { context: clusterName, kind } = args || {}
     const meta = KINDS[kind]
     if (!isName(clusterName) || !meta) return fail('invalid args')
-    const nsFlag = meta.ns ? '-A ' : ''
-    const [tableR, jsonR] = await Promise.all([
-      this.run('kubectl get ' + shq(kind) + ' ' + nsFlag, clusterName, 25000),
-      this.run('kubectl get ' + shq(kind) + ' ' + nsFlag + '-o json', clusterName, 30000),
+    const read = (selector: string) => Promise.all([
+      this.run('kubectl get ' + shq(kind) + selector, clusterName, 25000),
+      this.run('kubectl get ' + shq(kind) + selector + ' -o json', clusterName, 30000),
     ])
+    // `-A` needs cluster-scoped list permission. Accounts holding a role binding
+    // in a single namespace (common on shared clusters) get Forbidden, so fall
+    // back to the context namespace instead of failing the whole page.
+    let scope: 'cluster' | 'namespace' = 'cluster'
+    let namespace = ''
+    let pair = await read(meta.ns ? ' -A' : '')
+    if (meta.ns && pair.some(denied)) {
+      namespace = await this.contextNamespace(clusterName)
+      if (!namespace) {
+        return fail('当前 kubeconfig 只有命名空间级权限，且 context 未设置 namespace；可用 kubectl config set-context --current --namespace=<ns> 指定')
+      }
+      scope = 'namespace'
+      pair = await read(' -n ' + shq(namespace))
+    }
+    const [tableR, jsonR] = pair
     if (tableR.exitCode !== 0) {
       return fail(lastErr(tableR) || 'kubectl get 失败')
     }
@@ -181,7 +248,7 @@ class K8sService {
       phase: it.status?.phase,
       ready: kind === 'nodes' ? (it.status?.conditions || []).some((condition: any) => condition.type === 'Ready' && condition.status === 'True') : undefined,
     }))
-    return { ok: true, table: tableR.stdout.text, items }
+    return { ok: true, table: tableR.stdout.text, items, scope, namespace }
   }
 
   async yaml(args: any) {
